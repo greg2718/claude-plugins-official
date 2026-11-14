@@ -58,7 +58,7 @@ it still needs one action from you before it will connect:
 
 | System | What to do |
 |---|---|
-| **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later and run `pip install pywin32`. The plugin starts the bridge itself. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`). Open SOLIDWORKS with the model before asking |
+| **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later and run `pip install pywin32`. The plugin starts its bridge itself, and it needs SOLIDWORKS open with the model. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`) |
 
 ### CAD editions
 

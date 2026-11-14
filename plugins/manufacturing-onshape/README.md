@@ -58,7 +58,7 @@ it still needs one action from you before it will connect:
 
 | System | What to do |
 |---|---|
-| **Onshape** | Create an API key in Onshape (*My Account → Developer*, or *Company Settings → Developer* on Enterprise). Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from — never in the conversation. An Enterprise stack also sets `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; set `ONSHAPE_BRIDGE_PYTHON` if the launcher is not `python3`. A read-only key is enough for configuration-based variants |
+| **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |
 
 ### CAD editions
 

@@ -105,22 +105,25 @@ def not_built(e: Edition) -> str:
     )
 
 
+SW_SETUP_ROW = (
+    '| **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later and run `pip install pywin32`. The plugin starts its bridge itself, and it needs SOLIDWORKS open with the model. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`) |'
+)
+OS_SETUP_ROW = (
+    '| **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |'
+)
+# The upstream README's setup table for the other editions; each edition has its own row instead.
+OTHER_EDITIONS_SETUP = "\nThe SOLIDWORKS and Onshape [editions](#cad-editions) declare their own bridge in\n`.mcp.json` in place of Fusion's. Each also needs one action from you before it\nwill connect:\n\n| System | What to do |\n|---|---|\n| **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later and run `pip install pywin32`. The plugin starts its bridge itself, and it needs SOLIDWORKS open with the model. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`) |\n| **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |\n"
+
+
 def readme_edits(e: Edition) -> List[Tuple[str, str]]:
     N, k = e.name, e.key
     other = "Onshape" if k == "solidworks" else "SOLIDWORKS"
     if k == "solidworks":
-        setup_row = ("| **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later "
-                     "and run `pip install pywin32`. The plugin starts the bridge itself. If the Python launcher is "
-                     "not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`). Open SOLIDWORKS with the model "
-                     "before asking |")
+        setup_row = SW_SETUP_ROW
         declared = ("The SOLIDWORKS bridge is declared in `.mcp.json` as a local program, because it attaches to\n"
                     "SOLIDWORKS on your own Windows machine through the SOLIDWORKS API.")
     else:
-        setup_row = ("| **Onshape** | Create an API key in Onshape (*My Account → Developer*, or *Company Settings → "
-                     "Developer* on Enterprise). Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment "
-                     "Claude starts from — never in the conversation. An Enterprise stack also sets `ONSHAPE_BASE_URL` "
-                     "to `https://<company>.onshape.com`. Needs Python 3.10 or later; set `ONSHAPE_BRIDGE_PYTHON` if the "
-                     "launcher is not `python3`. A read-only key is enough for configuration-based variants |")
+        setup_row = OS_SETUP_ROW
         declared = ("The Onshape bridge is declared in `.mcp.json` as a local program that calls Onshape's REST\n"
                     "API with your API keys; nothing has to be open in a browser.")
     return [
@@ -139,6 +142,7 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
          f"Only {N} is declared in this plugin's `.mcp.json`, as its bundled bridge — but\nit still needs one action from you before it will connect:"),
         ("| **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |",
          setup_row),
+        (OTHER_EDITIONS_SETUP, ""),
         ("| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector (Fusion) |",
          f"| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector ({N}) |\n"
          f"| `servers/` | The {N} bridge: a standard-library MCP server the plugin starts itself |"),
