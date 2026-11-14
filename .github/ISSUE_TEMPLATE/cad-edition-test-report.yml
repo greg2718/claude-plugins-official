@@ -1,0 +1,61 @@
+name: CAD edition test report
+description: Report how the SOLIDWORKS or Onshape edition of Claude for Manufacturing worked for you
+title: "[Test report] "
+labels: ["test-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying a CAD edition. These editions are a community fork, not products of Anthropic, Dassault Systèmes or PTC.
+        Please don't paste API keys, passwords or customer part files here.
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Edition
+      options:
+        - manufacturing-solidworks
+        - manufacturing-onshape
+    validations:
+      required: true
+  - type: input
+    id: cad-version
+    attributes:
+      label: CAD version
+      description: SOLIDWORKS release and service pack, or Onshape plan (Standard, Professional, Enterprise)
+      placeholder: SOLIDWORKS 2025 SP2
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and Python version
+      placeholder: Windows 11, Python 3.12
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall result
+      options:
+        - Worked as described
+        - Worked with problems
+        - Did not work
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: The part (in general terms), the dimensions you varied and what you asked Claude for
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What worked, what failed, and any error text from the bridge or from Claude
+    validations:
+      required: true
+  - type: textarea
+    id: suggestions
+    attributes:
+      label: Anything else
+      description: Fixes you'd suggest, or what you'd want next
