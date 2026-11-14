@@ -111,8 +111,6 @@ SW_SETUP_ROW = (
 OS_SETUP_ROW = (
     '| **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |'
 )
-# The upstream README's setup table for the other editions; each edition has its own row instead.
-OTHER_EDITIONS_SETUP = "\nThe SOLIDWORKS and Onshape [editions](#cad-editions) declare their own bridge in\n`.mcp.json` in place of Fusion's. Each also needs one action from you before it\nwill connect:\n\n| System | What to do |\n|---|---|\n| **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later and run `pip install pywin32`. The plugin starts its bridge itself, and it needs SOLIDWORKS open with the model. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`) |\n| **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |\n"
 
 
 def readme_edits(e: Edition) -> List[Tuple[str, str]]:
@@ -138,11 +136,10 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
          f"1. Install this folder as a plugin (`claude --plugin-dir plugins/{e.plugin}` from a checkout)."),
         ("needs a live CAD connection: **Autodesk Fusion on the desktop** in this plugin,\n**SOLIDWORKS** or **Onshape** through their editions of it (see\n[CAD editions](#cad-editions)), or a CAD system connected through\n`custom-connector`. A shop running Creo, NX or Inventor has no path to that one\nskill yet. Its partner",
          f"needs a live CAD connection: **{N}, through the bridge bundled with this\nedition**. Autodesk Fusion and {other} have editions of their own (see\n[CAD editions](#cad-editions)). Its partner"),
-        ("Only Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address\nis already set — but it still needs one action from you before it will connect:",
+        ("Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address is\nalready set. The SOLIDWORKS and Onshape [editions](#cad-editions) declare their\nown bridge in its place. Each needs one action from you before it will connect:",
          f"Only {N} is declared in this plugin's `.mcp.json`, as its bundled bridge — but\nit still needs one action from you before it will connect:"),
-        ("| **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |",
+        ("| **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |\n" + SW_SETUP_ROW + "\n" + OS_SETUP_ROW,
          setup_row),
-        (OTHER_EDITIONS_SETUP, ""),
         ("| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector (Fusion) |",
          f"| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector ({N}) |\n"
          f"| `servers/` | The {N} bridge: a standard-library MCP server the plugin starts itself |"),

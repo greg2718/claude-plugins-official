@@ -50,19 +50,13 @@ Infor M3 are the two ERP options; a plant connects one:
 | **Oracle NetSuite** | Enable the Oracle NetSuite connector in Claude's connector settings. Read and write; the sign-in picks your account, so there is no account ID to enter here |
 | **Infor M3** | Add your company's Infor M3 MCP server as a custom connector in Claude's connector settings, using the server address your Infor administrator gives you. The plugin only reads from it |
 
-Only Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address
-is already set — but it still needs one action from you before it will connect:
+Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address is
+already set. The SOLIDWORKS and Onshape [editions](#cad-editions) declare their
+own bridge in its place. Each needs one action from you before it will connect:
 
 | System | What to do |
 |---|---|
 | **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |
-
-The SOLIDWORKS and Onshape [editions](#cad-editions) declare their own bridge in
-`.mcp.json` in place of Fusion's. Each also needs one action from you before it
-will connect:
-
-| System | What to do |
-|---|---|
 | **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later and run `pip install pywin32`. The plugin starts its bridge itself, and it needs SOLIDWORKS open with the model. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`) |
 | **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |
 
