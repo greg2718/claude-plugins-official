@@ -94,10 +94,13 @@ never an edit to the base in place. State what was created and its
 document reference as each one completes, not only at the end.
 
 **Generation is idempotent.** Before creating a variant, look for an existing
-document with the same name and the same parameter values: after a partial
-batch, a re-run, or a call that executed twice. If one exists, reuse it and
-record it in the manifest as `reused_existing` with its reference; never create
-a second copy. Two documents for one variant leave a manifest that cannot say
+one with the same name and the same parameter values: after a partial
+batch, a re-run, or a call that executed twice. **The Onshape bridge cannot
+search for one**, so look in this study's manifest, which records each
+document as it is made. If the manifest has it, reuse it and record it as
+`reused_existing` with its reference; never create a second copy. If there is
+no manifest from the earlier run, say so and ask the engineer before making
+new copies. Two documents for one variant leave a manifest that cannot say
 which is authoritative.
 
 **Why this matters more than it might seem to:** the base model is the

@@ -40,7 +40,8 @@ Read-only, record:
 
 - its name, its document reference and its version number
 - its parameters, and which of them drive geometry (`parametric-check.md`)
-- its bodies and sketches, by name
+- its feature list, by name and type (`sw_read_parameters`; sketches are features).
+  Its bodies cannot be listed through the bridge yet: record them as unknown
 - **whether it has unsaved changes.** If it does, stop. Someone has work open
   in it, and a save-as would carry that work into the new document. Ask the
   user to save or discard it themselves.
@@ -62,17 +63,22 @@ base where the engineer asked for one. Path B always uses a new document.
 
 ### 3. Integrity check, before
 
-List bodies and sketches in the new document, read-only. **They must match the
-prior model's list from step 1, name for name.** A new document that is a copy
-is not empty, so "a fresh document lists none" does not apply here; "it lists
-exactly what the prior model held" does. Anything else is foreign geometry: the
-copy is not the one expected, or something else wrote to it. Stop, and
-tell the user what was found.
+Read the new file's feature list (`sw_read_parameters`), read-only. **It must match
+the prior model's list from step 1, feature for feature.** Anything else is
+unexpected content: the copy is not the one expected, or something else wrote
+to it. Stop, and tell the user what was found.
+
+**The bridge cannot list bodies or external references yet.** So this check is
+never recorded as `clean`: record `document_integrity.result: not_checked`,
+with both feature lists, and `detail` saying the feature lists matched but
+bodies and external references could not be read by the SOLIDWORKS bridge.
 
 ### 4. Apply the parameters, and verify the regeneration
 
-Apply each changed parameter. After the set, confirm the model regenerated
-with no failed feature. A failure is reported with the feature that failed and
+Apply the whole parameter set in one call: the bridge checks every change
+before it writes any, and undoes the set if one fails part way. Then confirm
+the model regenerated with no failed feature. **Only `regenerated: true` is a
+pass**: false is a failure, and a missing or unknown health is treated as one. A failure is reported with the feature that failed and
 why: for `design-space-explore` the row is `regeneration_failed` and the batch
 goes on; for path B the line falls back to C2 (below).
 
@@ -83,8 +89,10 @@ B, check each changed dimension against the drawing value it came from.
 
 ### 6. Integrity check, after
 
-Same bodies and sketches by name, plus only what this step created. Anything
-else is foreign geometry and the step fails, with both lists recorded.
+The same feature list, read again with `sw_read_parameters`, plus only what this step
+created. Anything else is unexpected content and the step fails, with both
+lists recorded. As at step 3, the result is `not_checked`, never `clean`,
+because bodies and external references are not read.
 
 ### 7. Confirm the prior model is untouched
 
@@ -98,7 +106,8 @@ SOLIDWORKS or PDM, never this skill's.
 
 Per run: the prior model's reference and version, the new document's
 reference, each parameter as *from → to*, the regeneration result, both
-integrity lists, and the untouched check. `design-space-explore` writes these
+integrity lists, the integrity result (`not_checked`, with the reason),
+and the untouched check. `design-space-explore` writes these
 into the variant manifest (`base_model`, per-variant `document_ref`); path B
 writes them into the geometry estimate (`base_model_ref`, `document_ref`,
 `document_integrity`).
@@ -120,9 +129,12 @@ prior value → drawing value, drawing view and zone*. Where a difference is a
 feature the prior model does not have, or one it has and the drawing does not,
 or a dimension no driving parameter controls, path B does not fit that line.
 
-**When path B does not fit, the line falls back to C2**: built from the drawing
-in a fresh new document, and said in one line — *"Path B: <prior model>
-<reason>; built from the drawing as C2."* The reasons:
+**When path B does not fit, the line falls back to C2**, which in this edition
+is the hand-entered feature list, prefilled from the drawing as read (the SOLIDWORKS
+bridge does not build models from drawings yet; `cad-adapter.md`, *What this
+version does not do*). Say it in one line — *"Path B: <prior model> <reason>;
+hand-entered feature list from the drawing (C2), not built in CAD."* Never say
+the line was built from the drawing: nothing was built. The reasons:
 
 - the prior model is not on file, cannot be found, or the user cannot open it
 - it has unsaved changes the user has not resolved
@@ -131,8 +143,10 @@ in a fresh new document, and said in one line — *"Path B: <prior model>
 - the read-back does not match the drawing
 
 The geometry estimate is then emitted as `geometry_path: C2`, `origin:
-built_from_drawing`, `base_model_ref: null`, with the fallback and its reason
-as the first entry in `questions_for_estimator` so it is seen at Gate 3.
+hand_entered`, `cad_backend: none`, `document_ref: null`, `base_model_ref: null`,
+every row unconfirmed until the estimator confirms it at Gate 3, with the
+fallback and its reason as the first entry in `questions_for_estimator` so it is
+seen at Gate 3.
 
 **No SOLIDWORKS connection at all** is not a path B fallback; it is the same degradation as
 every path: the hand-entered feature list from the drawing, or no design step.

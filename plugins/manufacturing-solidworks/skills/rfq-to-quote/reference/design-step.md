@@ -42,7 +42,7 @@ makes a C2 line a B line. An earlier revision of the same part never does.
 | `C1` STEP, no drawing | **Imports the STEP and reads it.** Nothing generated. STEP import through the connector is **unverified** | *Path C1* |
 | `none` repeat part | Nothing to build. Priced from its routing or actuals, or a question back | |
 
-**Name the path that actually ran.** A path B line built from the drawing
+**Name the path that actually ran.** A path B line that fell back
 because the prior model was not there is reported as C2 with the reason, never
 as path B: calling it B would tell the estimator a prior part's proven geometry
 was reused when it was not.
@@ -139,10 +139,12 @@ version, `document_ref` the new document.
 on file, not found, the user cannot open it, unsaved changes in it, a change
 that is not its parameter, a failed regeneration, a read-back that does not
 match the drawing. Say it in one line, in these words, naming both paths so
-the estimator sees which one ran: *"Path B: PN-4402-A model not on file; built
-from the drawing as C2."* Emit the estimate as `geometry_path: C2`,
-`origin: built_from_drawing`, `base_model_ref: null`, with the fallback and its
-reason as the first entry in `questions_for_estimator`.
+the estimator sees which one ran: *"Path B: PN-4402-A model not on file;
+hand-entered feature list from the drawing (C2), not built in CAD."* In this
+edition the SOLIDWORKS bridge does not build from drawings, so emit the estimate as
+`geometry_path: C2`, `origin: hand_entered`, `cad_backend: none`,
+`base_model_ref: null`, with the fallback and its reason as the first entry in
+`questions_for_estimator`.
 
 The open, save-as-new and untouched-check calls have not been run through the
 connector. Say so at Gate 3 when path B ran.

@@ -43,11 +43,11 @@ there through the SOLIDWORKS API (COM).
 | Bridge tool | Adapter operation | SOLIDWORKS API it uses |
 |---|---|---|
 | `sw_status`, `sw_read_active_document` | Read the open document | `ISldWorks::ActiveDoc`, `RevisionNumber`; `IModelDoc2::GetTitle`, `GetPathName`, `GetType`, `GetSaveFlag`, `GetConfigurationNames`, `GetActiveConfiguration`; `IPartDoc::GetMaterialPropertyName2` |
-| `sw_protect_base` | Record the base and refuse writes to it | SHA-256 of the saved file, on disk. `GetSaveFlag` must be false |
-| `sw_read_parameters` | Read parameters, and which drive geometry | Feature tree (`FirstFeature`, `GetNextFeature`, `GetFirstSubFeature`), `IFeature::GetFirstDisplayDimension`, `IDisplayDimension::GetDimension2`, `IDimension::FullName`, `SystemValue`, `DrivenState`, `ReadOnly`; `IEquationMgr::GetCount`, `Equation`, `Value`, `GlobalVariable` |
+| `sw_protect_base` | Record the base and refuse writes to it | SHA-256 of the saved file, on disk. `GetSaveFlag` must be false. `sw_save_copy_and_open` also does this when it has not been done |
+| `sw_read_parameters` | Read parameters, and which drive geometry | Feature tree (`FirstFeature`, `GetNextFeature`, `GetFirstSubFeature`), `IFeature::GetFirstDisplayDimension`, `IDisplayDimension::GetDimension2`, `IDimension::FullName`, `SystemValue`, `DrivenState`, `ReadOnly`; `IEquationMgr::GetCount`, `Equation`, `Value`, `GlobalVariable`; the feature list (`IFeature::Name`, `GetTypeName2`) |
 | `sw_read_properties` | Read computed properties, and regeneration health | `IFeature::GetErrorCode2` on every feature; `IModelDocExtension::CreateMassProperty2` (`Mass`, `Volume`, `Density`); `IPartDoc::GetPartBox` |
-| `sw_save_copy_and_open` | Save as a new file, make it active | `IModelDocExtension::SaveAs3` with `swSaveAsOptions_Copy`; `ISldWorks::OpenDoc6`; `ISldWorks::ActivateDoc3` |
-| `sw_apply_parameters` | Apply a parameter set, regenerate | `IModelDoc2::Parameter` → `IDimension::SetSystemValue3` (this configuration); `IEquationMgr::Equation` (set); `IModelDoc2::ForceRebuild3` |
+| `sw_save_copy_and_open` | Save as a new file, make it active, and register it as the only kind of file the bridge writes | `IModelDocExtension::SaveAs3` with `swSaveAsOptions_Copy`; `ISldWorks::OpenDoc6`; `ISldWorks::ActivateDoc3` |
+| `sw_apply_parameters` | Check the whole set, apply it, undo it if a change fails, regenerate | `IModelDoc2::Parameter` → `IDimension::SetSystemValue3` (this configuration); `IEquationMgr::Equation` (set); `IModelDoc2::ForceRebuild3`, whose return value is checked |
 | `sw_save_active` | Save the variant file | `IModelDoc2::Save3` |
 | `sw_check_base_untouched` | Confirm the base did not move | SHA-256 of the base file against the one recorded |
 
@@ -98,8 +98,9 @@ The sequence is `adapt-prior-model.md`. The calls it needs:
 | Read the base's fingerprint | Confirm it did not move | `sw_check_base_untouched`, after the run. A changed file stops the run |
 
 **The prior model is never saved, never edited in place, and never the active
-document during a write.** The bridge enforces the last two: a write names the
-path it expects to be active, and a protected path is refused.
+document during a write.** The bridge enforces this: a write names the path it
+expects to be active, and only a copy the bridge made is written. See *What the
+bridge enforces, and what it cannot check*.
 
 **PDM.** If the base lives in a SOLIDWORKS PDM vault, the copy goes to a working
 folder **outside** the vault unless the engineer names a vault folder. Nothing
@@ -151,20 +152,52 @@ known to behave. **Read these before the first call.**
   is varied in the configuration that is active; say which.
 - **A rebuild that "succeeds" can still fail features.** `ForceRebuild3`
   returning true is not health. Health is `GetErrorCode2` on every feature: any
-  non-warning error is a failed variant, recorded as such, never measured.
+  non-warning error is a failed variant, recorded as such, never measured. And
+  `ForceRebuild3` returning false is a failed variant even with no feature
+  error: the geometry may not have moved.
 - **Dialogs block automation.** A modal dialog in SOLIDWORKS (a rebuild error
   prompt, a missing reference) stops every COM call until a person dismisses
   it. If calls start timing out, ask the user to look at the SOLIDWORKS window.
 - **External references.** A part with in-context references to an assembly
   can change when the assembly does, and a copy keeps pointing at the
-  original's references. Detect them (`sw_read_parameters` shows the features)
-  and warn before generating.
+  original's references. **The bridge cannot detect them yet.** Record
+  `external_references_present: unknown`, tell the engineer they were not
+  checked, and ask before generating.
 - **One SOLIDWORKS session, one caller.** COM calls into SOLIDWORKS run one at
   a time. Do not run two batches at once.
 - **SOLIDWORKS must be open with the document active.** There is no file-only
   path in this bridge.
 
 ---
+
+## What the bridge enforces, and what it cannot check
+
+These hold whatever order the calls come in, because the bridge enforces them
+itself rather than relying on the steps being followed:
+
+- **It writes only to a copy it made.** `sw_apply_parameters` and
+  `sw_save_active` refuse every file that `sw_save_copy_and_open` did not
+  create, including a base that was never protected. Making a copy protects the
+  original first if it is not protected yet. A copy of a copy is refused, so
+  every variant starts from the base.
+- **It checks a whole parameter set before changing anything**: every
+  dimension exists, is driving, is not read-only and is not set by an equation;
+  every global variable exists; every value is a number. If a change still fails
+  part way, it undoes the earlier changes in that call. If the undo itself
+  fails, it stops writing to that copy for good: discard it and make a new one.
+- **A failed rebuild is a failed variant.** If `ForceRebuild3` reports failure,
+  the variant is `regeneration_failed` even when no feature shows an error,
+  because the geometry may be the previous variant's. `sw_read_properties`
+  will not measure it.
+- **Its state fails closed.** The list of protected bases and bridge-made copies
+  is written atomically under a lock file. If the file cannot be read, the
+  bridge writes nothing until a person checks it and fixes or removes it
+  (`%USERPROFILE%\.manufacturing-solidworks\protected.json` unless
+  `SOLIDWORKS_BRIDGE_STATE` says otherwise).
+- **It cannot list bodies or external references yet.** It lists features
+  (sketches are features of type `ProfileFeature`). So the integrity check
+  compares feature lists and is recorded as `not_checked`, never `clean`, and
+  `external_references_present` is `unknown`, never `false`.
 
 ## Document integrity — before and after every design step
 
@@ -173,16 +206,19 @@ check stays, because a write landing in the wrong document is the failure that
 costs most.
 
 1. **Before**, read-only: `sw_read_active_document` and `sw_read_parameters`.
-   The active path is the copy's, and the feature list is the base's.
+   The active path is the copy's, and its feature list is the base's, feature
+   for feature.
 2. Run the step.
-3. **After**, read-only: the active path is still the copy's; every new feature
-   is one this step created. `sw_check_base_untouched` on the base.
+3. **After**, read-only: the active path is still the copy's; the feature list
+   is the base's plus only what this step created. `sw_check_base_untouched` on
+   the base.
 4. **Anything else fails the step.** Record the result in the geometry
    estimate's `document_integrity`, or the variant's `status_detail`, with both
    lists.
 
-A clean result is recorded too. "Not checked" is a result, and it is reported
-as one.
+**Matching feature lists are recorded as `not_checked`, not `clean`**, with the
+reason: the bridge cannot list bodies or external references yet. "Not
+checked" is a result, and it is reported as one.
 
 ---
 

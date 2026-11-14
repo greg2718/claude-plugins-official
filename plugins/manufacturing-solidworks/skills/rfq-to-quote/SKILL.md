@@ -298,7 +298,7 @@ nothing is written to a system. Read `../../shared/command-center.md`.
 | CAM | Not connected in this edition. Feature path only, and the label says so |
 | Plant cutting data | The feature path cannot time a cut; that op is rung 4 |
 | Routings and actuals | Tabs named missing. The ladder starts at rung 3 |
-| A prior part model (path B) | **Falls back to C2**, built from the drawing in a new document, and says so with the reason. The prior model is never written to |
+| A prior part model (path B) | **Falls back to C2**: in this edition the hand-entered feature list from the drawing, `origin: hand_entered`, not built in CAD, and says so with the reason. The prior model is never written to |
 | CAD, on a STEP file with no drawing (path C1) | **"C1: STEP read without CAD (unverified)"** — the STEP read as a text file, every value cited and labelled unverified. Else a hand-entered feature list, else skip step 7, labelled |
 | A drawing (path A, text specs only) | Built from the text, every dimension `from_text`. **A ROM, never a firm quote** — budgetary on the customer document, and nothing about how it was estimated |
 | Unexpected content in the file | Step 7 fails for that line. The user is told what was found |

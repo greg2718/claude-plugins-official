@@ -39,7 +39,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp_stdio import Server, ToolError, log  # noqa: E402
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 UNVERIFIED = " (Not yet run against a live Onshape account.)"
 
 # Feature parameter ids that hold a Part Studio variable's value, by variable type.
@@ -286,30 +286,82 @@ def driving_variables(features: List[Dict[str, Any]], names: Iterable[str]) -> D
     return {name: visit(name, frozenset()) for name in names}
 
 
-def feature_health(features_response: Dict[str, Any]) -> Dict[str, Any]:
+KNOWN_STATUSES = ("OK", "INFO", "WARNING", "ERROR", "UNKNOWN")
+
+
+def feature_health(features_response: Any) -> Dict[str, Any]:
     """Split the feature states into failed, warning and ok.
 
     `featureStatus` takes OK, INFO, WARNING, ERROR or UNKNOWN (GBTNodeStatusType).
     ERROR and UNKNOWN fail a variant; WARNING is reported and does not.
+
+    `regenerated` is True only on positive evidence: every active feature listed
+    in the response has a state, and every state is OK, INFO or WARNING. A
+    missing response, missing states, a feature with no state, or a status the
+    bridge does not recognise makes it None (unknown), which blocks measuring
+    exactly as a failure does.
     """
-    names = {f.get("featureId"): f.get("name") for f in features_response.get("features", []) or []}
-    states = features_response.get("featureStates", {}) or {}
-    failed, warnings = [], []
+    if not isinstance(features_response, dict):
+        return {"regenerated": None, "failed_features": [], "warning_features": [], "unknown_features": [],
+                "feature_count": 0, "note": "Onshape returned no feature list, so regeneration health is unknown."}
+    features = [f for f in (features_response.get("features") or []) if isinstance(f, dict)]
+    names = {f.get("featureId"): f.get("name") for f in features}
+    states = features_response.get("featureStates")
+    failed, warnings, unknown = [], [], []
+    notes = []
+    if not isinstance(states, dict) or not states:
+        notes.append("Onshape returned no feature states")
+        states = states if isinstance(states, dict) else {}
     for feature_id, state in states.items():
-        status = (state or {}).get("featureStatus", "UNKNOWN")
-        if (state or {}).get("inactive"):
+        state = state if isinstance(state, dict) else {}
+        if state.get("inactive"):
             continue
+        status = state.get("featureStatus")
         entry = {"feature_id": feature_id, "feature_name": names.get(feature_id), "status": status}
         if status in ("ERROR", "UNKNOWN"):
             failed.append(entry)
         elif status == "WARNING":
             warnings.append(entry)
-    return {
-        "regenerated": not failed,
+        elif status not in ("OK", "INFO"):
+            unknown.append(entry)
+    for feature in features:
+        if feature.get("featureId") not in states and not feature.get("suppressed"):
+            unknown.append({"feature_id": feature.get("featureId"), "feature_name": feature.get("name"), "status": None})
+    if unknown:
+        notes.append(f"{len(unknown)} feature(s) have a missing or unrecognised status")
+    if failed:
+        regenerated: Optional[bool] = False
+    elif notes:
+        regenerated = None
+    else:
+        regenerated = True
+    health: Dict[str, Any] = {
+        "regenerated": regenerated,
         "failed_features": failed,
         "warning_features": warnings,
+        "unknown_features": unknown,
         "feature_count": len(states),
     }
+    if regenerated is None:
+        health["note"] = "; ".join(notes) + ". Health is unknown: do not measure or record this variant as regenerated."
+    return health
+
+
+def feature_inventory(features_response: Any) -> List[Dict[str, Any]]:
+    """The Part Studio's features in order, for the before/after integrity comparison."""
+    features = (features_response or {}).get("features") if isinstance(features_response, dict) else None
+    return [
+        {"feature_id": f.get("featureId"), "name": f.get("name"), "type": f.get("featureType"), "suppressed": bool(f.get("suppressed"))}
+        for f in (features or [])
+        if isinstance(f, dict)
+    ]
+
+
+INTEGRITY_NOTE = (
+    "The feature list is read from Onshape (sketches are the features of type newSketch). The bridge cannot list "
+    "bodies or external references (derived parts, references to other documents) yet: record the integrity check "
+    "as not_checked, with the feature lists, and external references as unknown. Never record them as clean or absent."
+)
 
 
 def summarize_mass(mass_response: Any) -> Dict[str, Any]:
@@ -339,33 +391,163 @@ def _first(triple: Any) -> Optional[float]:
     return None
 
 
-class ProtectedDocuments:
-    """Documents read as a base model. Writes to them are refused.
+STATE_FORMAT = 2
 
-    Persisted to a small JSON file so a restarted connector still refuses.
+
+class StateLock:
+    """A lock file beside the state file, so two bridges never write the state at once.
+
+    Created with O_EXCL; a lock older than `stale_after` seconds is taken to be left
+    by a bridge that died, and removed.
+    """
+
+    def __init__(self, path: Path, timeout: float = 10.0, stale_after: float = 120.0) -> None:
+        self.path = path.with_name(path.name + ".lock")
+        self.timeout = timeout
+        self.stale_after = stale_after
+
+    def __enter__(self) -> "StateLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                handle = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(handle, str(os.getpid()).encode())
+                os.close(handle)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > self.stale_after:
+                        self.path.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() > deadline:
+                    raise ToolError(
+                        f"Another bridge is holding {self.path}. Wait for it to finish, then ask again. Nothing was changed."
+                    )
+                time.sleep(0.05)
+
+    def __exit__(self, *_: Any) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_json_atomically(path: Path, data: Any) -> None:
+    """Under the state lock, write to a temporary file in the same folder, flush it to disk, then
+    rename it over the target, so a crash leaves either the old file or the new one, never half of one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with StateLock(path):
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+
+class ProtectedDocuments:
+    """What the bridge may and may not write, persisted so a restarted bridge keeps refusing.
+
+    `entries`: base documents read at the start of a run. Never written.
+    `copies`: documents this bridge made with onshape_copy_workspace, with the one
+    workspace it made. The only documents it writes.
+
+    If the state file exists but cannot be read, nothing is written at all until a
+    person fixes or removes it (fail closed).
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.entries: Dict[str, Dict[str, Any]] = {}
-        if path.exists():
-            try:
-                self.entries = json.loads(path.read_text("utf-8"))
-            except ValueError:
-                log(f"Ignoring unreadable state file {path}")
+        self.copies: Dict[str, Dict[str, Any]] = {}
+        self.error: Optional[str] = None
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("top level is not an object")
+            if data.get("format") == STATE_FORMAT:
+                protected, copies = data.get("protected"), data.get("copies")
+                if not isinstance(protected, dict) or not isinstance(copies, dict):
+                    raise ValueError("protected and copies must be objects")
+            elif "format" not in data and all(isinstance(v, dict) and "workspace_id" in v for v in data.values()):
+                protected, copies = data, {}  # the first version's file: protected bases only
+            else:
+                raise ValueError("unrecognised layout")
+            for record in list(protected.values()) + list(copies.values()):
+                if not isinstance(record, dict) or not record.get("workspace_id"):
+                    raise ValueError("an entry has no workspace id")
+            self.entries, self.copies = protected, copies
+        except (OSError, ValueError) as err:
+            self.error = f"The bridge's state file {path} cannot be read ({err})."
+            log(self.error + " Refusing every write until it is fixed or removed.")
+
+    def require_readable(self) -> None:
+        if self.error:
+            raise ToolError(
+                self.error + " It records which base documents are protected, so the bridge writes nothing until "
+                "a person checks it, then fixes or removes it. Nothing was changed."
+            )
+
+    def _save(self) -> None:
+        write_json_atomically(self.path, {"format": STATE_FORMAT, "protected": self.entries, "copies": self.copies})
 
     def add(self, document_id: str, record: Dict[str, Any]) -> None:
+        self.require_readable()
+        if document_id in self.copies:
+            raise ToolError(f"Document {document_id} is a copy this bridge made, not a base model.")
         self.entries[document_id] = record
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.entries, indent=2), "utf-8")
+        self._save()
 
-    def check_writable(self, document_id: str) -> None:
+    def register_copy(self, document_id: str, record: Dict[str, Any]) -> None:
+        self.require_readable()
+        if document_id in self.entries:
+            raise ToolError(f"Refused: document {document_id} is a protected base model.")
+        self.copies[document_id] = record
+        self._save()
+
+    def retire_copy(self, document_id: str, reason: str) -> None:
+        record = self.copies.get(document_id)
+        if record is not None:
+            record["retired"] = reason
+            try:
+                self._save()
+            except (OSError, ToolError) as err:
+                log(f"Could not record the retired copy: {err}")
+
+    def check_writable(self, document_id: str, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+        self.require_readable()
         if document_id in self.entries:
             name = self.entries[document_id].get("name")
             raise ToolError(
                 f"Refused: document {document_id} ({name}) is a protected base model. Variants and estimating "
                 "models are written to a copy, never the base. Copy the workspace to a new document first."
             )
+        record = self.copies.get(document_id)
+        if record is None:
+            raise ToolError(
+                f"Refused: document {document_id} is not a copy this bridge made. The bridge writes only to a "
+                "document made with onshape_copy_workspace, never to one it did not create. Nothing was written."
+            )
+        if workspace_id is not None and workspace_id != record.get("workspace_id"):
+            raise ToolError(
+                f"Refused: workspace {workspace_id} is not the workspace the bridge made in copy {document_id}. "
+                "Nothing was written."
+            )
+        if record.get("retired"):
+            raise ToolError(
+                f"Refused: copy {document_id} was left in an unknown state ({record['retired']}). Discard it and "
+                "make a new copy. Nothing was written."
+            )
+        return record
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +564,7 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
         version=VERSION,
         instructions=(
             "CAD adapter for manufacturing-onshape. Read cad-adapter.md before the first call. "
-            "Protect the base document before any write; every write goes to a copied document."
+            "Every write goes to a document made with onshape_copy_workspace; the bridge refuses any other."
         ),
     )
     state: Dict[str, Optional[OnshapeClient]] = {"client": None}
@@ -391,6 +573,28 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
         if state["client"] is None:
             state["client"] = client_factory()
         return state["client"]
+
+    def current_microversion(did: str, wid: str) -> Optional[str]:
+        answer = client().request("GET", f"/documents/d/{did}/w/{wid}/currentmicroversion")
+        value = answer.get("microversion") if isinstance(answer, dict) else None
+        return value if isinstance(value, str) and value.strip() else None
+
+    def protect_document(did: str, wid: str) -> Dict[str, Any]:
+        document = client().request("GET", f"/documents/{did}") or {}
+        microversion = current_microversion(did, wid)
+        if not microversion:
+            raise ToolError(
+                f"Onshape returned no microversion for document {did}, workspace {wid}, so the bridge could not record "
+                "where the base stands. It was not protected, and nothing will be copied from it."
+            )
+        record = {
+            "name": document.get("name"),
+            "workspace_id": wid,
+            "microversion": microversion,
+            "protected_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        protected.add(did, record)
+        return record
 
     def wvm_path(args: Dict[str, Any]) -> str:
         return f"/d/{args['document_id']}/{args['wvm']}/{args['wvm_id']}/e/{args['element_id']}"
@@ -406,6 +610,8 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
             "api_version": client().api_version,
             "acting_as": {k: (info or {}).get(k) for k in ("name", "id")},
             "protected_documents": len(protected.entries),
+            "bridge_copies": len(protected.copies),
+            "state_error": protected.error,
             "api_calls_this_session": client().calls,
         }
 
@@ -430,6 +636,7 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
                 {"id": e.get("id"), "name": e.get("name"), "type": e.get("elementType")} for e in (elements or [])
             ],
             "protected": did in protected.entries,
+            "bridge_copy": did in protected.copies,
         }
 
     @server.tool(
@@ -441,15 +648,8 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
     )
     def protect_base(args: Dict[str, Any]) -> Dict[str, Any]:
         did, wid = args["document_id"], args["workspace_id"]
-        document = client().request("GET", f"/documents/{did}") or {}
-        microversion = client().request("GET", f"/documents/d/{did}/w/{wid}/currentmicroversion") or {}
-        record = {
-            "name": document.get("name"),
-            "workspace_id": wid,
-            "microversion": microversion.get("microversion"),
-            "protected_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        }
-        protected.add(did, record)
+        protected.require_readable()
+        record = protect_document(did, wid)
         return {"document_id": did, **record}
 
     @server.tool(
@@ -464,13 +664,23 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
         record = protected.entries.get(did)
         if not record:
             raise ToolError(f"Document {did} was never protected, so there is no recorded microversion to compare.")
-        now = client().request("GET", f"/documents/d/{did}/w/{record['workspace_id']}/currentmicroversion") or {}
-        current = now.get("microversion")
+        recorded = record.get("microversion")
+        if not isinstance(recorded, str) or not recorded.strip():
+            raise ToolError(
+                f"No microversion was recorded when document {did} was protected, so the bridge cannot say whether it "
+                "moved. Treat the base as unchecked and tell the user."
+            )
+        current = current_microversion(did, record["workspace_id"])
+        if not current:
+            raise ToolError(
+                f"Onshape returned no current microversion for document {did}, so the bridge cannot say whether it "
+                "moved. Treat the base as unchecked and tell the user."
+            )
         return {
             "document_id": did,
-            "recorded_microversion": record.get("microversion"),
+            "recorded_microversion": recorded,
             "current_microversion": current,
-            "untouched": current == record.get("microversion"),
+            "untouched": current == recorded,
         }
 
     @server.tool(
@@ -526,6 +736,8 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
                 for p in configuration.get("configurationParameters", []) or []
             ],
             "health": feature_health(features_response),
+            "features": feature_inventory(features_response),
+            "integrity_note": INTEGRITY_NOTE,
             "note": (
                 "drives_geometry is read from expressions: a variable referenced by no geometry feature, directly "
                 "or through another variable, does not drive this Part Studio. It does not see references from "
@@ -552,15 +764,17 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
         base = "/partstudios" + wvm_path(args)
         features_response = client().request("GET", base + "/features", query) or {}
         health = feature_health(features_response)
-        if not health["regenerated"]:
-            return {"health": health, "properties": None, "note": "Failed regeneration: not measured."}
+        if health["regenerated"] is not True:
+            reason = "Failed regeneration" if health["regenerated"] is False else "Regeneration health unknown"
+            return {"health": health, "properties": None, "note": f"{reason}: not measured."}
         mass = client().request("GET", base + "/massproperties", query)
         boxes = client().request("GET", base + "/boundingboxes", query)
         return {
             "health": health,
             "mass_properties": summarize_mass(mass),
             "bounding_box_m": boxes,
-            "bounding_box_note": "Onshape documents these boxes as approximate. Use onshape_eval_featurescript with evBox3d tight for a check against a hand calculation.",
+            "configuration": args.get("configuration"),
+            "bounding_box_note": "Onshape documents these boxes as approximate. Use onshape_eval_featurescript with evBox3d tight, and the same configuration, for a check against a hand calculation.",
         }
 
     @server.tool(
@@ -589,24 +803,47 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
     @server.tool(
         "onshape_eval_featurescript",
         "Evaluate a FeatureScript lambda against a Part Studio, e.g. a tight bounding box with evBox3d. "
-        "Evaluation does not change the model. Onshape only evaluates lambda expressions here." + UNVERIFIED,
-        {"document_id": ID, "wvm": WVM, "wvm_id": ID, "element_id": ID, "script": {"type": "string", "minLength": 1}},
+        "Evaluation does not change the model. Onshape only evaluates lambda expressions here. Pass the same "
+        "configuration as the property read it checks, or the default configuration is evaluated." + UNVERIFIED,
+        {
+            "document_id": ID,
+            "wvm": WVM,
+            "wvm_id": ID,
+            "element_id": ID,
+            "script": {"type": "string", "minLength": 1},
+            "configuration": {"type": "string", "description": "Encoded configuration, as for onshape_read_properties"},
+        },
         ["document_id", "wvm", "wvm_id", "element_id", "script"],
     )
     def eval_featurescript(args: Dict[str, Any]) -> Any:
-        return client().request(
-            "POST", "/partstudios" + wvm_path(args) + "/featurescript", body={"script": args["script"], "queries": []}
+        query = {"configuration": args["configuration"]} if args.get("configuration") else None
+        result = client().request(
+            "POST", "/partstudios" + wvm_path(args) + "/featurescript", query, body={"script": args["script"], "queries": []}
         )
+        return {"configuration": args.get("configuration") or "default", "result": result}
 
     @server.tool(
         "onshape_copy_workspace",
         "Copy a workspace into a NEW document and return the new document's ids. This is how a variant or an "
-        "adapted prior model starts: the source document is read, never written." + UNVERIFIED,
+        "adapted prior model starts: the source document is read, never written. If the source is not yet "
+        "protected, it is protected first. Registers the copy as the only kind of document the bridge writes." + UNVERIFIED,
         {"document_id": ID, "workspace_id": ID, "new_name": {"type": "string", "minLength": 1}},
         ["document_id", "workspace_id", "new_name"],
         read_only=False,
     )
     def copy_workspace(args: Dict[str, Any]) -> Dict[str, Any]:
+        protected.require_readable()
+        source = args["document_id"]
+        if source in protected.copies:
+            raise ToolError(
+                "Refused: this document is already a copy this bridge made. Make each copy from the base model, so "
+                "every variant starts from the same geometry."
+            )
+        protected_now = False
+        if source not in protected.entries:
+            # The base is protected here, by the bridge, rather than trusting that onshape_protect_base ran first.
+            protect_document(source, args["workspace_id"])
+            protected_now = True
         result = client().request(
             "POST",
             f"/documents/{args['document_id']}/workspaces/{args['workspace_id']}/copy",
@@ -614,15 +851,29 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
         ) or {}
         new_did = result.get("newDocumentId")
         new_wid = result.get("newWorkspaceId")
-        if new_did and new_did == args["document_id"]:
+        if not new_did or not new_wid:
+            raise ToolError("Onshape did not return the new document and workspace ids. Nothing will be written to any copy.")
+        if new_did == source:
             raise ToolError("Onshape returned the source document id for the copy. Stopping: nothing will be written.")
-        return {"new_document_id": new_did, "new_workspace_id": new_wid, "name": args["new_name"]}
+        protected.register_copy(
+            new_did,
+            {
+                "workspace_id": new_wid,
+                "name": args["new_name"],
+                "source_document_id": source,
+                "source_workspace_id": args["workspace_id"],
+                "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            },
+        )
+        return {"new_document_id": new_did, "new_workspace_id": new_wid, "name": args["new_name"], "source_protected_by_this_call": protected_now}
 
     @server.tool(
         "onshape_set_variables",
-        "Set variable expressions in a COPIED document: Part Studio #variable features, or a Variable Studio's "
-        "variables. Refuses a protected base document, and refuses unless the document's name matches "
-        "expected_document_name. Returns each variable from -> to; read health and properties afterwards." + UNVERIFIED,
+        "Set variable expressions in a document this bridge copied: Part Studio #variable features, or a Variable "
+        "Studio's variables. Writes only to a registered copy and its own workspace, and only when the document's "
+        "name matches expected_document_name. Checks every assignment before writing any, and undoes earlier writes "
+        "if a later one fails. Returns a change journal (from -> to, written, undone) and, for a Part Studio, the "
+        "regeneration health read after the writes." + UNVERIFIED,
         {
             "document_id": ID,
             "workspace_id": ID,
@@ -636,15 +887,20 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
     )
     def set_variables(args: Dict[str, Any]) -> Dict[str, Any]:
         did, wid, eid = args["document_id"], args["workspace_id"], args["element_id"]
-        protected.check_writable(did)
+        protected.check_writable(did, wid)
         document = client().request("GET", f"/documents/{did}") or {}
         if document.get("name") != args["expected_document_name"]:
             raise ToolError(
                 f"Refused: document {did} is named {document.get('name')!r}, not {args['expected_document_name']!r}. "
                 "Nothing was written."
             )
+        if not isinstance(args["assignments"], dict) or not args["assignments"]:
+            raise ToolError("assignments must name at least one variable. Nothing was written.")
         assignments: Dict[str, str] = {k: str(v) for k, v in args["assignments"].items()}
-        changes = []
+        blank = sorted(k for k, v in assignments.items() if not v.strip())
+        if blank:
+            raise ToolError(f"No expression given for: {', '.join(blank)}. Nothing was written.")
+        changes: List[Dict[str, Any]] = []
         if args["element_kind"] == "VARIABLESTUDIO":
             tables = client().request("GET", f"/variables/d/{did}/w/{wid}/e/{eid}/variables") or []
             variables = [v for t in tables for v in (t.get("variables") or [])]
@@ -656,52 +912,113 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
             for variable in variables:
                 entry = {k: variable.get(k) for k in ("name", "type", "expression", "description") if variable.get(k) is not None}
                 if variable.get("name") in assignments:
-                    changes.append({"name": variable["name"], "from": variable.get("expression"), "to": assignments[variable["name"]]})
+                    changes.append({"name": variable["name"], "from": variable.get("expression"), "to": assignments[variable["name"]], "written": False})
                     entry["expression"] = assignments[variable["name"]]
                 body.append(entry)
-            client().request("POST", f"/variables/d/{did}/w/{wid}/e/{eid}/variables", body=body)
-        else:
-            response = client().request("GET", f"/partstudios/d/{did}/w/{wid}/e/{eid}/features") or {}
-            features = response.get("features", []) or []
-            by_name = {}
-            for feature in features:
-                if feature.get("featureType") == "assignVariable":
-                    by_name[(parameter_value(feature, "name") or {}).get("value")] = feature
-            missing = sorted(set(assignments) - set(by_name))
-            if missing:
-                raise ToolError(f"No #variable feature named: {', '.join(missing)}. Nothing was written.")
-            for name, expression in assignments.items():
-                feature = json.loads(json.dumps(by_name[name]))
-                target = None
-                for parameter_id in VARIABLE_VALUE_PARAMETER_IDS:
-                    target = parameter_value(feature, parameter_id)
-                    if target and "expression" in target:
-                        break
-                if not target:
-                    raise ToolError(f"#variable {name} has no value parameter this connector recognises. Stopped before writing it.")
-                changes.append({"name": name, "from": target.get("expression"), "to": expression})
-                target["expression"] = expression
-                client().request(
-                    "POST",
-                    f"/partstudios/d/{did}/w/{wid}/e/{eid}/features/featureid/{feature['featureId']}",
-                    body={
-                        "btType": "BTFeatureDefinitionCall-1406",
-                        "feature": feature,
-                        "serializationVersion": response.get("serializationVersion"),
-                        "sourceMicroversion": response.get("sourceMicroversion"),
-                    },
-                )
-        return {"document_id": did, "changes": changes, "next": "Read health and properties before recording this variant."}
+            client().request("POST", f"/variables/d/{did}/w/{wid}/e/{eid}/variables", body=body)  # one call: all or none
+            for change in changes:
+                change["written"] = True
+            return {
+                "document_id": did,
+                "changes": changes,
+                "health": {"regenerated": None, "note": "A Variable Studio has no geometry. Read the Part Studio's health with onshape_read_properties."},
+            }
+
+        # Part Studio #variable features: check and prepare every update before writing any.
+        response = client().request("GET", f"/partstudios/d/{did}/w/{wid}/e/{eid}/features") or {}
+        features = response.get("features", []) or []
+        by_name = {}
+        for feature in features:
+            if feature.get("featureType") == "assignVariable":
+                by_name[(parameter_value(feature, "name") or {}).get("value")] = feature
+        missing = sorted(set(assignments) - set(by_name))
+        if missing:
+            raise ToolError(f"No #variable feature named: {', '.join(missing)}. Nothing was written.")
+        prepared = []
+        unrecognised = []
+        for name, expression in assignments.items():
+            original = by_name[name]
+            feature = json.loads(json.dumps(original))
+            target = None
+            for parameter_id in VARIABLE_VALUE_PARAMETER_IDS:
+                target = parameter_value(feature, parameter_id)
+                if target and "expression" in target:
+                    break
+            if not target or "expression" not in target:
+                unrecognised.append(name)
+                continue
+            before = target.get("expression")
+            target["expression"] = expression
+            prepared.append({"name": name, "feature": feature, "original": original, "from": before, "to": expression})
+        if unrecognised:
+            raise ToolError(f"No value parameter this connector recognises on: {', '.join(unrecognised)}. Nothing was written.")
+
+        def post(feature: Dict[str, Any], source_microversion: Any) -> Any:
+            return client().request(
+                "POST",
+                f"/partstudios/d/{did}/w/{wid}/e/{eid}/features/featureid/{feature['featureId']}",
+                body={
+                    "btType": "BTFeatureDefinitionCall-1406",
+                    "feature": feature,
+                    "serializationVersion": response.get("serializationVersion"),
+                    "sourceMicroversion": source_microversion,
+                },
+            )
+
+        source_microversion = response.get("sourceMicroversion")
+        written: List[Dict[str, Any]] = []
+        for item in prepared:
+            change = {"name": item["name"], "from": item["from"], "to": item["to"], "written": False}
+            changes.append(change)
+            try:
+                answer = post(item["feature"], source_microversion)
+            except ToolError as err:
+                # Undo what this call wrote, newest first, so the copy is as it was before the call.
+                undo_failed = []
+                for done in reversed(written):
+                    try:
+                        latest = client().request("GET", f"/partstudios/d/{did}/w/{wid}/e/{eid}/features") or {}
+                        post(done["original"], latest.get("sourceMicroversion"))
+                        done["change"]["undone"] = True
+                    except ToolError as undo_err:
+                        done["change"]["undone"] = False
+                        undo_failed.append(f"{done['name']}: {undo_err}")
+                journal = json.dumps(changes)
+                if undo_failed:
+                    protected.retire_copy(did, "a variable change failed and could not be fully undone")
+                    raise ToolError(
+                        f"Writing {item['name']} failed: {err}. Undoing the earlier changes did not fully succeed "
+                        f"({'; '.join(undo_failed)}), so this copy is in an unknown state and the bridge will not write "
+                        f"to it again. Discard it and make a new copy. Change journal: {journal}"
+                    ) from err
+                raise ToolError(
+                    f"Writing {item['name']} failed: {err}. The {len(written)} earlier change(s) in this call were undone. "
+                    f"Change journal: {journal}"
+                ) from err
+            change["written"] = True
+            if isinstance(answer, dict) and isinstance(answer.get("sourceMicroversion"), str):
+                source_microversion = answer["sourceMicroversion"]
+            written.append({"name": item["name"], "original": item["original"], "change": change})
+
+        after = client().request("GET", f"/partstudios/d/{did}/w/{wid}/e/{eid}/features")
+        return {
+            "document_id": did,
+            "changes": changes,
+            "health": feature_health(after),
+            "features": feature_inventory(after),
+            "next": "Measure only if health.regenerated is true.",
+        }
 
     @server.tool(
         "onshape_create_version",
-        "Create a named version (an immutable snapshot) of a workspace. Use it to pin a variant's result, or to "
-        "record the base at the start of a run. A version changes no geometry." + UNVERIFIED,
+        "Create a named version (an immutable snapshot) of a copied document's workspace, to pin a variant's "
+        "result. A version changes no geometry. Only for a copy this bridge made." + UNVERIFIED,
         {"document_id": ID, "workspace_id": ID, "name": {"type": "string", "minLength": 1}},
         ["document_id", "workspace_id", "name"],
         read_only=False,
     )
     def create_version(args: Dict[str, Any]) -> Dict[str, Any]:
+        protected.check_writable(args["document_id"], args["workspace_id"])
         result = client().request(
             "POST",
             f"/documents/d/{args['document_id']}/versions",

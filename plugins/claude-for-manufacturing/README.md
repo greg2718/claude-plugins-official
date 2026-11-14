@@ -11,14 +11,20 @@ PTC, and **neither has been run against a real SOLIDWORKS session or Onshape
 account yet**: their bridges were checked against each vendor's API
 documentation and unit tests, not live use.
 
+**Test only with disposable copies of parts, never with models you value.** The
+bridges write only to copies they make themselves, check each parameter set
+before changing anything, and refuse to measure a model that did not rebuild
+cleanly, but none of that has been proven on real CAD yet.
+
 If you use SOLIDWORKS or Onshape, a first test would help a lot:
 
 1. From a checkout of this fork, run `claude --plugin-dir plugins/manufacturing-solidworks`
    or `claude --plugin-dir plugins/manufacturing-onshape`.
 2. Connect your CAD system as the setup table below says for your edition.
-3. Open a copy of a simple part with two or three driving dimensions and ask
-   for a few variants (`design-space-explore`). Variants are saved as new
-   files or documents and the original is left alone, but use a copy anyway.
+3. Make a throwaway copy of a simple part with two or three driving dimensions,
+   open that copy, and ask for a few variants (`design-space-explore`).
+4. Afterwards, check that your throwaway part is unchanged, and try a value
+   that should fail to rebuild to see that the variant is reported as failed.
 
 Tell us what happened in a [test report](https://github.com/greg2718/claude-plugins-official/issues/new?template=cad-edition-test-report.yml),
 or open a pull request with a fix. Fixes go in `tools/cad-variants/` (its

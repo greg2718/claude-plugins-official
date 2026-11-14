@@ -51,15 +51,15 @@ library only: Python 3.10+ is all it needs.
 |---|---|---|
 | `onshape_status` | Check the connection | `GET /users/sessioninfo` |
 | `onshape_read_document` | Read the document | `GET /documents/{did}`, `/documents/d/{did}/workspaces`, `/documents/d/{did}/w/{wid}/elements` |
-| `onshape_protect_base` | Record the base and refuse writes to it | `GET /documents/d/{did}/w/{wid}/currentmicroversion` |
+| `onshape_protect_base` | Record the base and refuse writes to it. Refuses when Onshape returns no microversion | `GET /documents/d/{did}/w/{wid}/currentmicroversion` |
 | `onshape_read_parameters` | Read parameters, and which drive geometry | `GET /partstudios/d/{did}/{wvm}/{wvmid}/e/{eid}/features`; `GET /variables/.../variables`; `GET /elements/.../configuration` |
 | `onshape_read_properties` | Read computed properties, and regeneration health | `features` (`featureStates`), `massproperties`, `boundingboxes`, each with an optional `configuration` |
 | `onshape_encode_configuration` | Address one configuration | `POST /elements/d/{did}/e/{eid}/configurationencodings` |
-| `onshape_eval_featurescript` | A measured property the REST reads do not give (a tight box) | `POST /partstudios/.../featurescript` |
-| `onshape_copy_workspace` | Create a variant document | `POST /documents/{did}/workspaces/{wid}/copy` |
-| `onshape_set_variables` | Apply a parameter set | Part Studio `#variable` features (`POST .../features/featureid/{fid}`) or a Variable Studio (`POST /variables/d/{did}/w/{wid}/e/{eid}/variables`) |
-| `onshape_create_version` | Pin a variant | `POST /documents/d/{did}/versions` |
-| `onshape_check_base_untouched` | Confirm the base did not move | the base workspace's current microversion against the one recorded |
+| `onshape_eval_featurescript` | A measured property the REST reads do not give (a tight box). Pass the same `configuration` as the read it checks | `POST /partstudios/.../featurescript`, with the optional `configuration` |
+| `onshape_copy_workspace` | Create a variant document, protect its source if needed, and register the copy as the only kind of document the bridge writes | `POST /documents/{did}/workspaces/{wid}/copy` |
+| `onshape_set_variables` | Check the whole set, apply it, undo it if a write fails, read health after | Part Studio `#variable` features (`POST .../features/featureid/{fid}`, one per variable, then `GET .../features`) or a Variable Studio (`POST /variables/d/{did}/w/{wid}/e/{eid}/variables`, one call) |
+| `onshape_create_version` | Pin a variant, in a bridge-made copy only | `POST /documents/d/{did}/versions` |
+| `onshape_check_base_untouched` | Confirm the base did not move. Refuses to answer when either microversion is missing | the base workspace's current microversion against the one recorded |
 
 **The vendor's MCP server is a different tool.** PTC's *FeatureScript MCP
 Server* (Onshape Labs, an early-access programme, announced August 2026, at
@@ -87,12 +87,14 @@ configuration. **Use this whenever the parameters allow it.**
 a write never goes to the base:
 
 1. `onshape_protect_base` on the base document. The bridge refuses every write
-   to it from then on, across restarts.
+   to it from then on, across restarts. (Step 2 does this itself if it has not
+   been done, but doing it first records the base before anything else runs.)
 2. `onshape_copy_workspace` → a new document named for the variant (or, for
    path B, `<inquiry>_L<line>_<part>_R<rev>`).
 3. `onshape_set_variables` on the copy, naming the copy in
    `expected_document_name`. Refused on any other document.
-4. `onshape_read_properties` on the copy's workspace.
+4. `onshape_read_properties` on the copy's workspace, measured only when
+   `regenerated` is `true`.
 5. Optionally `onshape_create_version` on the copy, so the result is pinned.
 6. `onshape_check_base_untouched` at the end.
 
@@ -162,12 +164,16 @@ From Onshape's API documentation. **Read these before the first call.**
 - **Bounding boxes are approximate.** Onshape documents its bounding-box
   values as approximate, for graphics. Record them labelled so, and never use
   them for the read-back against a hand calculation; use volume, or a tight box
-  from `onshape_eval_featurescript` with `evBox3d(context, { "topology" : qAllModifiableSolidBodies(), "tight" : true })`.
+  from `onshape_eval_featurescript` with `evBox3d(context, { "topology" : qAllModifiableSolidBodies(), "tight" : true })`,
+  passing the same `configuration` as the property read, or it measures the
+  default configuration.
 - **No material, no mass.** A body with no material reports `hasMass: false`.
   The bridge returns its mass as `null`, with the reason. Never score it.
 - **Health is per feature.** `featureStatus` is `OK`, `INFO`, `WARNING`,
   `ERROR` or `UNKNOWN`. `ERROR` or `UNKNOWN` on any active feature is a failed
   variant, recorded as such, never measured. `WARNING` is reported and passes.
+  A missing or unrecognised status is unknown health, and is not measured
+  either.
 - **Writes go to workspaces only.** Versions and microversions are immutable;
   a write names a `w`. Reading a version (`v`) is how a pinned variant is
   re-measured later.
@@ -180,10 +186,43 @@ From Onshape's API documentation. **Read these before the first call.**
 
 ---
 
+## What the bridge enforces, and what it cannot check
+
+These hold whatever order the calls come in, because the bridge enforces them
+itself rather than relying on the steps being followed:
+
+- **It writes only to a copy it made.** `onshape_set_variables` and
+  `onshape_create_version` refuse every document that `onshape_copy_workspace`
+  did not create, and every workspace in it but the one the copy made,
+  including a base that was never protected. Making a copy protects the source
+  first if it is not protected yet. A copy of a copy is refused.
+- **It checks every assignment before writing any.** If a write still fails
+  part way, it undoes the earlier writes in that call and returns a change
+  journal (from, to, written, undone). If the undo fails, it stops writing to
+  that copy for good: discard it and make a new one.
+- **Health must be positive evidence.** `regenerated` is `true` only when every
+  active feature has a recognised state of `OK`, `INFO` or `WARNING`. A missing
+  feature list, missing states or an unrecognised status is `null` (unknown),
+  and `onshape_read_properties` will not measure it, exactly as for `ERROR`.
+- **The untouched check needs real microversions.** Protecting a base refuses
+  when Onshape returns no microversion, and `onshape_check_base_untouched`
+  refuses to answer when either the recorded or the current microversion is
+  missing, rather than comparing two empty values.
+- **Its state fails closed.** The list of protected bases and bridge-made copies
+  is written atomically under a lock file. If the file cannot be read, the
+  bridge writes nothing until a person checks it and fixes or removes it
+  (`~/.manufacturing-onshape/protected.json` unless `ONSHAPE_BRIDGE_STATE`
+  says otherwise).
+- **It cannot list bodies or external references yet.** It lists features
+  (sketches are features of type `newSketch`). So the integrity check compares
+  feature lists and is recorded as `not_checked`, never `clean`, and
+  `external_references_present` is `unknown`, never `false`.
+
 ## Document integrity — before and after every design step
 
 1. **Before**, read-only: the copy's document name is the one expected, and
-   its feature list matches the base's, feature for feature.
+   its feature list (`onshape_read_parameters`, `features`) matches the base's,
+   feature for feature.
 2. Run the step.
 3. **After**, read-only: the copy's feature list is the base's plus only what
    this step changed; `onshape_check_base_untouched` on the base.
@@ -191,8 +230,9 @@ From Onshape's API documentation. **Read these before the first call.**
    estimate's `document_integrity`, or the variant's `status_detail`, with both
    lists.
 
-A clean result is recorded too. "Not checked" is a result, and it is reported
-as one.
+**Matching feature lists are recorded as `not_checked`, not `clean`**, with the
+reason: the bridge cannot list bodies or external references yet. "Not
+checked" is a result, and it is reported as one.
 
 ---
 

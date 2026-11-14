@@ -107,6 +107,10 @@ parametric_check:
   external_references_present: true
 ```
 
+`external_references_present` is `true`, `false` or `unknown`. The SOLIDWORKS bridge
+cannot read external references yet, so a manifest from this edition says
+`unknown` unless the engineer has told you which it is.
+
 `requested_not_driving` is the field that matters. A parameter the engineer wanted
 to vary that is not actually a driving dimension in the model means those variants
 could not be generated, and the manifest has to say which rather than silently

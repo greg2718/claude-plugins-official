@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp_stdio import Server, ToolError, log  # noqa: E402
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 UNVERIFIED = " (Not yet run against a live SOLIDWORKS session.)"
 
 # Enum values, from the SOLIDWORKS API Help's swconst pages.
@@ -112,32 +112,172 @@ def global_variable_drivers(equations: List[Dict[str, Any]]) -> Dict[str, Dict[s
     }
 
 
+STATE_FORMAT = 2
+INTEGRITY_NOTE = (
+    "The feature list is read from the FeatureManager tree (sketches are the features of type ProfileFeature). "
+    "The bridge cannot list bodies or external references (in-context or derived references) yet: record the "
+    "integrity check as not_checked, with the feature lists, and external references as unknown. Never record "
+    "them as clean or absent."
+)
+
+
+class StateLock:
+    """A lock file beside the state file, so two bridges never write the state at once.
+
+    Created with O_EXCL; a lock older than `stale_after` seconds is taken to be left
+    by a bridge that died, and removed.
+    """
+
+    def __init__(self, path: Path, timeout: float = 10.0, stale_after: float = 120.0) -> None:
+        self.path = path.with_name(path.name + ".lock")
+        self.timeout = timeout
+        self.stale_after = stale_after
+
+    def __enter__(self) -> "StateLock":
+        import time
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                handle = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(handle, str(os.getpid()).encode())
+                os.close(handle)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > self.stale_after:
+                        self.path.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() > deadline:
+                    raise ToolError(
+                        f"Another bridge is holding {self.path}. Wait for it to finish, then ask again. Nothing was changed."
+                    )
+                time.sleep(0.05)
+
+    def __exit__(self, *_: Any) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_json_atomically(path: Path, data: Any) -> None:
+    """Under the state lock, write to a temporary file in the same folder, flush it to disk, then
+    rename it over the target, so a crash leaves either the old file or the new one, never half of one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with StateLock(path):
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+
 class ProtectedFiles:
-    """Base files read at the start of a run. Writes while one is active are refused,
-    and nothing is ever saved to a protected path."""
+    """What the bridge may and may not write, persisted so a restarted bridge keeps refusing.
+
+    `protected`: base files read at the start of a run. Never written.
+    `copies`: files this bridge made with sw_save_copy_and_open. The only files it writes.
+
+    If the state file exists but cannot be read, nothing is written at all until a
+    person fixes or removes it (fail closed): an empty list would silently drop
+    the protection of every base recorded in it.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.entries: Dict[str, Dict[str, Any]] = {}
-        if path.exists():
-            try:
-                self.entries = json.loads(path.read_text("utf-8"))
-            except ValueError:
-                log(f"Ignoring unreadable state file {path}")
+        self.copies: Dict[str, Dict[str, Any]] = {}
+        self.error: Optional[str] = None
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("top level is not an object")
+            if data.get("format") == STATE_FORMAT:
+                protected, copies = data.get("protected"), data.get("copies")
+                if not isinstance(protected, dict) or not isinstance(copies, dict):
+                    raise ValueError("protected and copies must be objects")
+            elif "format" not in data and all(isinstance(v, dict) and "sha256" in v for v in data.values()):
+                protected, copies = data, {}  # the first version's file: protected bases only
+            else:
+                raise ValueError("unrecognised layout")
+            for record in list(protected.values()) + list(copies.values()):
+                if not isinstance(record, dict):
+                    raise ValueError("an entry is not an object")
+            self.entries, self.copies = protected, copies
+        except (OSError, ValueError) as err:
+            self.error = f"The bridge's state file {path} cannot be read ({err})."
+            log(self.error + " Refusing every write until it is fixed or removed.")
+
+    def _require_readable(self) -> None:
+        if self.error:
+            raise ToolError(
+                self.error + " It records which base files are protected, so the bridge writes nothing until "
+                "a person checks it, then fixes or removes it. Nothing was changed."
+            )
+
+    def _save(self) -> None:
+        write_json_atomically(self.path, {"format": STATE_FORMAT, "protected": self.entries, "copies": self.copies})
 
     def add(self, file_path: str, record: Dict[str, Any]) -> None:
-        self.entries[normalise(file_path)] = record
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.entries, indent=2), "utf-8")
+        self._require_readable()
+        key = normalise(file_path)
+        if key in self.copies:
+            raise ToolError(f"{file_path} is a copy this bridge made, not a base model.")
+        self.entries[key] = record
+        self._save()
+
+    def register_copy(self, file_path: str, record: Dict[str, Any]) -> None:
+        self._require_readable()
+        key = normalise(file_path)
+        if key in self.entries:
+            raise ToolError(f"Refused: {file_path} is a protected base path.")
+        self.copies[key] = record
+        self._save()
+
+    def retire_copy(self, file_path: str, reason: str) -> None:
+        """Stop writing to a copy whose state is no longer known."""
+        record = self.copies.get(normalise(file_path))
+        if record is not None:
+            record["retired"] = reason
+            try:
+                self._save()
+            except OSError as err:  # the in-memory mark still refuses writes for this session
+                log(f"Could not record the retired copy: {err}")
 
     def is_protected(self, file_path: str) -> bool:
         return normalise(file_path) in self.entries
 
+    def is_copy(self, file_path: str) -> bool:
+        return normalise(file_path) in self.copies
+
     def check_writable(self, file_path: str) -> None:
+        self._require_readable()
         if self.is_protected(file_path):
             raise ToolError(
                 f"Refused: {file_path} is a protected base model. Variants and estimating models are written "
                 "to a copy, never the base. Use sw_save_copy_and_open first."
+            )
+        record = self.copies.get(normalise(file_path))
+        if record is None:
+            raise ToolError(
+                f"Refused: {file_path} is not a copy this bridge made. The bridge writes only to a copy made "
+                "with sw_save_copy_and_open, never to a file it did not create. Nothing was changed."
+            )
+        if record.get("retired"):
+            raise ToolError(
+                f"Refused: the copy {file_path} was left in an unknown state ({record['retired']}). Discard it and "
+                "make a new copy. Nothing was changed."
             )
 
 
@@ -271,6 +411,9 @@ class SolidWorksSession:
             )
         return out
 
+    def feature_list(self, doc: Any) -> List[Dict[str, Any]]:
+        return [{"name": f.Name, "type": f.GetTypeName2()} for f in self._walk_features(doc)]
+
     def feature_errors(self, doc: Any) -> List[Dict[str, Any]]:
         problems = []
         for feature in self._walk_features(doc):
@@ -319,18 +462,24 @@ class SolidWorksSession:
         status = dimension.SetSystemValue3(float(value_si), SW_SET_VALUE_IN_THIS_CONFIGURATION, None)
         return SET_VALUE_STATUS.get(status, str(status))
 
-    def set_global(self, doc: Any, name: str, expression: str) -> str:
+    def find_global(self, doc: Any, name: str) -> Optional[Dict[str, Any]]:
         manager = doc.GetEquationMgr()
         for index in range(manager.GetCount()):
             parsed = parse_equation(manager.Equation(index))
             if manager.GlobalVariable(index) and parsed and parsed["target"] == name:
-                before = manager.Equation(index)
-                self._put_indexed(manager, "Equation", index, f'"{name}" = {expression}')
-                return before
-        raise ToolError(f"No global variable named {name}. Nothing further was changed.")
+                return {"index": index, "text": manager.Equation(index)}
+        return None
+
+    def put_equation(self, doc: Any, index: int, text: str) -> None:
+        self._put_indexed(doc.GetEquationMgr(), "Equation", index, text)
 
     def rebuild(self, doc: Any) -> bool:
-        return bool(doc.ForceRebuild3(False))
+        """True only when SOLIDWORKS reports the rebuild succeeded. An exception counts as a failure."""
+        try:
+            return bool(doc.ForceRebuild3(False))
+        except Exception as err:  # noqa: BLE001
+            log(f"ForceRebuild3 raised: {err}")
+            return False
 
     def save(self, doc: Any) -> Dict[str, Any]:
         errors, warnings = self._out_int(), self._out_int()
@@ -351,10 +500,34 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
         version=VERSION,
         instructions=(
             "CAD adapter for manufacturing-solidworks. Read cad-adapter.md before the first call. "
-            "Protect the base file before any write; every write goes to a copy."
+            "Every write goes to a copy made with sw_save_copy_and_open; the bridge refuses any other file."
         ),
     )
     state: Dict[str, Optional[SolidWorksSession]] = {"session": None}
+    stale: Dict[str, str] = {}  # copies whose last rebuild failed: geometry on screen may be stale
+
+    def health_of(doc: Any, rebuild_ok: Optional[bool]) -> Dict[str, Any]:
+        """Regeneration health. A rebuild SOLIDWORKS reported as failed is a failure even when no
+        feature shows an error: the geometry may be the previous variant's."""
+        path = normalise(doc.GetPathName() or doc.GetTitle())
+        if rebuild_ok is False:
+            stale[path] = "the last rebuild reported failure"
+        elif rebuild_ok is True:
+            stale.pop(path, None)
+        errors = session().feature_errors(doc)
+        failed = [e for e in errors if not e["warning"]]
+        health: Dict[str, Any] = {
+            "regenerated": not failed and path not in stale,
+            "rebuild_reported_success": rebuild_ok if rebuild_ok is not None else (path not in stale),
+            "failed_features": failed,
+            "warning_features": [e for e in errors if e["warning"]],
+        }
+        if path in stale:
+            health["note"] = (
+                "SOLIDWORKS reported the rebuild as failed, so the geometry may be stale. This variant failed: "
+                "do not measure it or record its properties."
+            )
+        return health
 
     def session() -> SolidWorksSession:
         if state["session"] is None:
@@ -379,6 +552,8 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
             "solidworks_revision": s.revision(),
             "active_document": s.describe(doc) if doc is not None else None,
             "protected_files": len(protected.entries),
+            "bridge_copies": len(protected.copies),
+            "state_error": protected.error,
         }
 
     @server.tool(
@@ -423,6 +598,10 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
         record = protected.entries.get(key)
         if not record:
             raise ToolError(f"{args['path']} was never protected, so there is no recorded fingerprint to compare.")
+        if not record.get("sha256"):
+            raise ToolError(f"The record for {args['path']} has no fingerprint, so the bridge cannot say whether it changed.")
+        if not Path(args["path"]).exists():
+            return {"path": args["path"], "untouched": False, "note": "The base file is no longer at this path. Stop and tell the user."}
         now = file_fingerprint(Path(args["path"]))
         return {
             "path": args["path"],
@@ -447,6 +626,8 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
             "equations": equations,
             "global_variables": global_variable_drivers(equations),
             "units": "SI: metres for lengths, radians for angles",
+            "features": session().feature_list(doc),
+            "integrity_note": INTEGRITY_NOTE,
         }
 
     @server.tool(
@@ -457,12 +638,9 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
     )
     def read_properties(_: Dict[str, Any]) -> Dict[str, Any]:
         doc = session().active_doc()
-        errors = session().feature_errors(doc)
-        failed = [e for e in errors if not e["warning"]]
-        result: Dict[str, Any] = {
-            "health": {"regenerated": not failed, "failed_features": failed, "warning_features": [e for e in errors if e["warning"]]},
-        }
-        if failed:
+        health = health_of(doc, None)
+        result: Dict[str, Any] = {"health": health}
+        if not health["regenerated"]:
             result["properties"] = None
             result["note"] = "Failed rebuild: not measured."
             return result
@@ -479,8 +657,10 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
     @server.tool(
         "sw_save_copy_and_open",
         "Save the active document as a copy at a NEW path, open the copy and make it the active document. The "
-        "original is not saved and stays as it was on disk. Refuses an existing path and a protected path. Returns "
-        "the active document's path, which must be the new one before any write." + UNVERIFIED,
+        "original is not saved and stays as it was on disk. If the original is not yet protected, it is protected "
+        "first (its SHA-256 recorded). Refuses an existing path, a protected path, and copying a copy. Registers the "
+        "copy as the only kind of file the bridge writes. Returns the active document's path, which must be the new "
+        "one before any write." + UNVERIFIED,
         {"new_path": PATH},
         ["new_path"],
         read_only=False,
@@ -490,26 +670,46 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
         source = doc.GetPathName()
         if doc.GetSaveFlag():
             raise ToolError("The active document has unsaved changes. Ask the user to save or discard them first.")
+        if not source:
+            raise ToolError("The active document has never been saved, so it has no file to copy from. Ask the user to save it first.")
+        protected._require_readable()
         target = check_new_path(args["new_path"], protected)
+        if protected.is_copy(source):
+            raise ToolError(
+                "Refused: the active document is already a copy this bridge made. Make each copy from the base "
+                "model, so every variant starts from the same geometry."
+            )
         if source and Path(source).name.lower() == target.name.lower():
             raise ToolError(
                 "Refused: the copy has the same file name as the open original. SOLIDWORKS cannot open two documents "
                 "with one name at once, so the copy would not become active. Choose another file name."
             )
+        protected_now = False
+        if not protected.is_protected(source):
+            # The base is protected here, by the bridge, rather than trusting that sw_protect_base ran first.
+            record = {"title": doc.GetTitle(), **file_fingerprint(Path(source)), "protected_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+            protected.add(source, record)
+            protected_now = True
         result = session().save_copy(doc, str(target))
         if not result["ok"] or not target.exists():
             raise ToolError(f"SOLIDWORKS did not write the copy (errors {result['errors']}, warnings {result['warnings']}).")
+        try:
+            protected.register_copy(str(target), {"source": source, "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat()})
+        except OSError as err:
+            raise ToolError(f"The copy was written to {target}, but the bridge could not record it ({err}), so it will not write to it.") from err
         active = session().open_and_activate(str(target), doc.GetType())
         active_path = active.GetPathName()
         if normalise(active_path) != normalise(str(target)):
             raise ToolError(f"The copy was written, but the active document is {active_path}, not the copy. Stopping before any write.")
-        return {"source": source, "copy": active_path, "active_is_copy": True}
+        return {"source": source, "source_protected_by_this_call": protected_now, "copy": active_path, "active_is_copy": True}
 
     @server.tool(
         "sw_apply_parameters",
         "Change dimensions (full name -> value in SI units) and global variables (name -> expression with units) in "
-        "the active document, then rebuild. Refuses unless the active document is expected_path, and refuses a "
-        "protected base. Returns each change from -> to and the rebuild health. Does not save." + UNVERIFIED,
+        "the active document, then rebuild. Writes only to a copy this bridge made, and only when it is the active "
+        "document at expected_path. Checks the whole set before changing anything, and undoes the set if a change "
+        "fails part way. Returns each change from -> to and the rebuild health; a rebuild SOLIDWORKS reports as "
+        "failed is a failed variant. Does not save." + UNVERIFIED,
         {
             "expected_path": PATH,
             "dimensions": {"type": "object", "description": "e.g. {\"D1@Boss-Extrude1\": 0.0035}"},
@@ -520,26 +720,92 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
     )
     def apply_parameters(args: Dict[str, Any]) -> Dict[str, Any]:
         doc = active_for_write(args["expected_path"])
-        changes = []
-        for name, expression in (args.get("global_variables") or {}).items():
-            before = session().set_global(doc, name, str(expression))
-            changes.append({"name": name, "kind": "global_variable", "from": before, "to": f'"{name}" = {expression}'})
-        current = {d["name"]: d for d in session().dimensions(doc)} if args.get("dimensions") else {}
-        for name, value in (args.get("dimensions") or {}).items():
-            if name in current and not current[name]["driving"]:
-                raise ToolError(f"{name} is not a driving dimension. Stopped; earlier changes in this call: {changes}")
-            status = session().set_dimension(doc, name, value)
-            changes.append({"name": name, "kind": "dimension", "from": current.get(name, {}).get("value_si"), "to": value, "status": status})
-            if status != "Successful":
-                raise ToolError(f"SOLIDWORKS refused {name} = {value}: {status}. Changes so far: {changes}")
-        session().rebuild(doc)
-        errors = session().feature_errors(doc)
-        failed = [e for e in errors if not e["warning"]]
-        return {"changes": changes, "health": {"regenerated": not failed, "failed_features": failed}, "saved": False}
+        dimension_values = args.get("dimensions") or {}
+        global_values = args.get("global_variables") or {}
+        if not isinstance(dimension_values, dict) or not isinstance(global_values, dict):
+            raise ToolError("dimensions and global_variables must be objects. Nothing was changed.")
+        if not dimension_values and not global_values:
+            raise ToolError("No dimensions or global variables to change. Nothing was changed.")
+
+        # 1. Validate the whole batch before changing anything.
+        problems: List[str] = []
+        current = {d["name"]: d for d in session().dimensions(doc)} if dimension_values else {}
+        equation_targets = set()
+        if dimension_values:
+            for equation in session().equations(doc):
+                parsed = parse_equation(equation.get("text", ""))
+                if parsed and not equation.get("global_variable"):
+                    equation_targets.add(parsed["target"])
+        for name, value in dimension_values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf")):
+                problems.append(f"{name}: {value!r} is not a number in SI units")
+            elif name not in current:
+                problems.append(f"{name}: no such dimension in the active document")
+            elif not current[name]["driving"]:
+                problems.append(f"{name}: not a driving dimension")
+            elif current[name]["read_only"]:
+                problems.append(f"{name}: read-only")
+            elif name in equation_targets:
+                problems.append(f"{name}: set by an equation, which would overwrite it at the next rebuild; vary the global variable it reads")
+        found_globals: Dict[str, Dict[str, Any]] = {}
+        for name, expression in global_values.items():
+            if not isinstance(expression, (str, int, float)) or isinstance(expression, bool) or not str(expression).strip():
+                problems.append(f"{name}: {expression!r} is not an expression")
+                continue
+            found = session().find_global(doc, name)
+            if found is None:
+                problems.append(f"{name}: no such global variable")
+            else:
+                found_globals[name] = found
+        if problems:
+            raise ToolError("Nothing was changed. This parameter set cannot be applied: " + "; ".join(problems) + ".")
+
+        # 2. Apply, remembering how to undo each change.
+        changes: List[Dict[str, Any]] = []
+        undo: List[Callable[[], None]] = []
+        try:
+            for name, expression in global_values.items():
+                found = found_globals[name]
+                new_text = f'"{name}" = {expression}'
+                session().put_equation(doc, found["index"], new_text)
+                undo.append(lambda i=found["index"], text=found["text"]: session().put_equation(doc, i, text))
+                changes.append({"name": name, "kind": "global_variable", "from": found["text"], "to": new_text})
+            for name, value in dimension_values.items():
+                before = current[name]["value_si"]
+                status = session().set_dimension(doc, name, value)
+                if status == "Successful":
+                    undo.append(lambda n=name, v=before: session().set_dimension(doc, n, v))
+                    changes.append({"name": name, "kind": "dimension", "from": before, "to": value, "status": status})
+                else:
+                    raise ToolError(f"SOLIDWORKS refused {name} = {value}: {status}")
+        except Exception as err:  # noqa: BLE001
+            not_undone = []
+            for step in reversed(undo):
+                try:
+                    step()
+                except Exception as undo_err:  # noqa: BLE001
+                    not_undone.append(str(undo_err))
+            rebuilt = session().rebuild(doc) if undo else True
+            reason = str(err)
+            if not_undone or not rebuilt:
+                protected.retire_copy(args["expected_path"], "a parameter change failed and could not be fully undone")
+                raise ToolError(
+                    f"{reason}. Undoing the earlier changes in this call did not fully succeed, so this copy is in an "
+                    "unknown state: the bridge will not write to it again. Discard it and make a new copy. Nothing was saved."
+                ) from err
+            raise ToolError(
+                f"{reason}. The {len(undo)} earlier change(s) in this call were undone, so the copy is as it was before "
+                "this call. Nothing was saved."
+            ) from err
+
+        # 3. Rebuild, and believe SOLIDWORKS when it says the rebuild failed.
+        rebuild_ok = session().rebuild(doc)
+        return {"changes": changes, "health": health_of(doc, rebuild_ok), "saved": False}
 
     @server.tool(
         "sw_save_active",
-        "Save the active document in place. Refuses unless it is expected_path, and refuses a protected base." + UNVERIFIED,
+        "Save the active document in place. Saves only a copy this bridge made, and only when it is the active "
+        "document at expected_path." + UNVERIFIED,
         {"expected_path": PATH},
         ["expected_path"],
         read_only=False,

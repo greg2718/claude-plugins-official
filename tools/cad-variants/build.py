@@ -143,7 +143,7 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
         ("| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector (Fusion) |",
          f"| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector ({N}) |\n"
          f"| `servers/` | The {N} bridge: a standard-library MCP server the plugin starts itself |"),
-        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + " edition 1 |"),
+        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + " edition 2 |"),
         ("| Connectors | 1 declared in `.mcp.json` — Autodesk Fusion.", f"| Connectors | 1 declared in `.mcp.json` — {N}, through the bundled bridge."),
         ("To run it from a local checkout: `claude --plugin-dir .`, then say \"set us up\".",
          "To run it from a local checkout: `claude --plugin-dir .` in this folder, then say \"set us up\"."),
@@ -374,9 +374,123 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
 # ---------------------------------------------------------------------------
 
 
+def safety_edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
+    """Edits from the Nov 14 review: say what the bridges can and cannot check, and label a
+    failed adaptation as what it is. Applied after `edits`, to the text those edits produced."""
+    N, k = e.name, e.key
+    read_tool = "sw_read_parameters" if k == "solidworks" else "onshape_read_parameters"
+    copy_tool = "sw_save_copy_and_open" if k == "solidworks" else "onshape_copy_workspace"
+    fallback = (
+        f"**When path B does not fit, the line falls back to C2**, which in this edition\n"
+        f"is the hand-entered feature list, prefilled from the drawing as read (the {N}\n"
+        f"bridge does not build models from drawings yet; `cad-adapter.md`, *What this\n"
+        f"version does not do*). Say it in one line — *\"Path B: <prior model> <reason>;\n"
+        f"hand-entered feature list from the drawing (C2), not built in CAD.\"* Never say\n"
+        f"the line was built from the drawing: nothing was built. The reasons:"
+    )
+    emitted = (
+        "The geometry estimate is then emitted as `geometry_path: C2`, `origin:\n"
+        "hand_entered`, `cad_backend: none`, `document_ref: null`, `base_model_ref: null`,\n"
+        "every row unconfirmed until the estimator confirms it at Gate 3, with the\n"
+        "fallback and its reason as the first entry in `questions_for_estimator` so it is\n"
+        "seen at Gate 3."
+    )
+    integrity_before = (
+        f"Read the new {e.doc}'s feature list (`{read_tool}`), read-only. **It must match\n"
+        f"the prior model's list from step 1, feature for feature.** Anything else is\n"
+        f"unexpected content: the copy is not the one expected, or something else wrote\n"
+        f"to it. Stop, and tell the user what was found.\n\n"
+        f"**The bridge cannot list bodies or external references yet.** So this check is\n"
+        f"never recorded as `clean`: record `document_integrity.result: not_checked`,\n"
+        f"with both feature lists, and `detail` saying the feature lists matched but\n"
+        f"bodies and external references could not be read by the {N} bridge."
+    )
+    return {
+        "skills/design-space-explore/reference/adapt-prior-model.md": [
+            ("- its bodies and sketches, by name",
+             f"- its feature list, by name and type (`{read_tool}`; sketches are features).\n"
+             "  Its bodies cannot be listed through the bridge yet: record them as unknown"),
+            ("List bodies and sketches in the new document, read-only. **They must match the\nprior model's list from step 1, name for name.** A new document that is a copy\nis not empty, so \"a fresh document lists none\" does not apply here; \"it lists\nexactly what the prior model held\" does. Anything else is foreign geometry: the\ncopy is not the one expected, or something else wrote to it. Stop, and\ntell the user what was found.",
+             integrity_before),
+            ("Same bodies and sketches by name, plus only what this step created. Anything\nelse is foreign geometry and the step fails, with both lists recorded.",
+             f"The same feature list, read again with `{read_tool}`, plus only what this step\n"
+             "created. Anything else is unexpected content and the step fails, with both\n"
+             "lists recorded. As at step 3, the result is `not_checked`, never `clean`,\n"
+             "because bodies and external references are not read."),
+            ("Apply each changed parameter. After the set, confirm the model regenerated\nwith no failed feature.",
+             "Apply the whole parameter set in one call: the bridge checks every change\n"
+             "before it writes any, and undoes the set if one fails part way. Then confirm\n"
+             "the model regenerated with no failed feature. **Only `regenerated: true` is a\n"
+             "pass**: false is a failure, and a missing or unknown health is treated as one."),
+            ("the regeneration result, both\nintegrity lists, and the untouched check.",
+             "the regeneration result, both\nintegrity lists, the integrity result (`not_checked`, with the reason),\n"
+             "and the untouched check."),
+            ("**When path B does not fit, the line falls back to C2**: built from the drawing\nin a fresh new document, and said in one line — *\"Path B: <prior model>\n<reason>; built from the drawing as C2.\"* The reasons:",
+             fallback),
+            ("The geometry estimate is then emitted as `geometry_path: C2`, `origin:\nbuilt_from_drawing`, `base_model_ref: null`, with the fallback and its reason\nas the first entry in `questions_for_estimator` so it is seen at Gate 3.",
+             emitted),
+        ],
+        "skills/design-space-explore/reference/parametric-check.md": [
+            ("  decide whether to proceed with that risk understood rather than discover\n  a broken assembly reference after the batch runs.",
+             "  decide whether to proceed with that risk understood rather than discover\n  a broken assembly reference after the batch runs.\n"
+             f"  **The {N} bridge cannot read external references yet.** Record\n"
+             "  `external_references_present: unknown`, never `false`, and tell the\n"
+             "  engineer before generating that they were not checked, so they can say\n"
+             "  whether the model has any."),
+        ],
+        "skills/design-space-explore/SKILL.md": [
+            ("- **The model has external references or in-context relationships** —\n  variant generation can break them. Detect and warn before generating.",
+             "- **The model has external references or in-context relationships** —\n  variant generation can break them. This edition's bridge cannot detect\n"
+             "  them yet: say they were not checked, and ask, before generating."),
+        ],
+        "skills/design-space-explore/reference/variant-generation.md": [
+            ("**Generation is idempotent.** Before creating a variant, look for an existing\ndocument with the same name and the same parameter values: after a partial\nbatch, a re-run, or a call that executed twice. If one exists, reuse it and\nrecord it in the manifest as `reused_existing` with its reference; never create\na second copy.",
+             "**Generation is idempotent.** Before creating a variant, look for an existing\n"
+             "one with the same name and the same parameter values: after a partial\n"
+             f"batch, a re-run, or a call that executed twice. **The {N} bridge cannot\n"
+             f"search for one**, so look in this study's manifest, which records each\n"
+             f"{e.doc} as it is made. If the manifest has it, reuse it and record it as\n"
+             "`reused_existing` with its reference; never create a second copy. If there is\n"
+             "no manifest from the earlier run, say so and ask the engineer before making\n"
+             "new copies"
+             + (" (the bridge already refuses a file name that exists)." if k == "solidworks" else ".")),
+        ],
+        "skills/rfq-to-quote/SKILL.md": [
+            ("| A prior part model (path B) | **Falls back to C2**, built from the drawing in a new document, and says so with the reason. The prior model is never written to |",
+             f"| A prior part model (path B) | **Falls back to C2**: in this edition the hand-entered feature list from the drawing, `origin: hand_entered`, not built in CAD, and says so with the reason. The prior model is never written to |"),
+        ],
+        "skills/rfq-to-quote/reference/design-step.md": [
+            ("**Name the path that actually ran.** A path B line built from the drawing\nbecause the prior model was not there",
+             "**Name the path that actually ran.** A path B line that fell back\nbecause the prior model was not there"),
+            ("match the drawing. Say it in one line, in these words, naming both paths so\nthe estimator sees which one ran: *\"Path B: PN-4402-A model not on file; built\nfrom the drawing as C2.\"* Emit the estimate as `geometry_path: C2`,\n`origin: built_from_drawing`, `base_model_ref: null`, with the fallback and its\nreason as the first entry in `questions_for_estimator`.",
+             "match the drawing. Say it in one line, in these words, naming both paths so\n"
+             "the estimator sees which one ran: *\"Path B: PN-4402-A model not on file;\n"
+             "hand-entered feature list from the drawing (C2), not built in CAD.\"* In this\n"
+             f"edition the {N} bridge does not build from drawings, so emit the estimate as\n"
+             "`geometry_path: C2`, `origin: hand_entered`, `cad_backend: none`,\n"
+             "`base_model_ref: null`, with the fallback and its reason as the first entry in\n"
+             "`questions_for_estimator`."),
+        ],
+        "shared/contracts/geometry-estimate.md": [
+            ("a path B line that fell back is `C2` and `built_from_drawing` |",
+             f"a path B line that fell back is `C2` and, in this {N} edition, `hand_entered`, because the bridge does not build from drawings |"),
+        ],
+        "shared/contracts/variant-manifest.md": [
+            ("  external_references_present: true\n```",
+             "  external_references_present: true\n```\n\n"
+             f"`external_references_present` is `true`, `false` or `unknown`. The {N} bridge\n"
+             "cannot read external references yet, so a manifest from this edition says\n"
+             "`unknown` unless the engineer has told you which it is."),
+        ],
+    }
+
+
 def apply_edits(target: Path, edition: Edition) -> List[str]:
     problems = []
-    for rel, pairs in edits(edition).items():
+    combined = edits(edition)
+    for rel, pairs in safety_edits(edition).items():
+        combined[rel] = combined.get(rel, []) + pairs
+    for rel, pairs in combined.items():
         path = target / rel
         if not path.exists():
             problems.append(f"{rel}: file not found")

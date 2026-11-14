@@ -63,7 +63,7 @@ in.
 
 | Field | Type | Behavior | Notes |
 |---|---|---|---|
-| `origin` | enum | Required | `built_from_drawing`, `adapted_from_prior`, `customer_step`, `built_from_text`, `hand_entered`. Per the path table above. `geometry_path` is the path that actually ran: a path B line that fell back is `C2` and `built_from_drawing` |
+| `origin` | enum | Required | `built_from_drawing`, `adapted_from_prior`, `customer_step`, `built_from_text`, `hand_entered`. Per the path table above. `geometry_path` is the path that actually ran: a path B line that fell back is `C2` and, in this Onshape edition, `hand_entered`, because the bridge does not build from drawings |
 | `document_ref` | string or null | Degrades | The new Onshape document the model lives in. Null on `hand_entered` |
 | `base_model_ref` | string or null | Optional | The prior part's model and the version it was opened at, path B only. **Never overwritten** — the producer reads its version again after the run and stops if it moved. Null on every other path, including a path B line that fell back to C2 |
 | `cad_backend` | enum | Required | `onshape` or `none`. `none` on `hand_entered`, and on `customer_step` when the STEP was read as text without CAD |
