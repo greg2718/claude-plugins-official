@@ -548,6 +548,18 @@ class FakeSession:
         self.feature_failures = []
         self.refuse = {}
         self.fail_undo = False
+        # Building: a stateful feature tree and body list.
+        self.features = [{"name": "Boss-Extrude1", "type": "Extrusion"}, {"name": "Sketch1", "type": "ProfileFeature"}]
+        self.body_list = [{"name": "Boss-Extrude1", "face_count": 6}]
+        self.template = "C:/Templates/Part.prtdot"
+        self.edge_hits = 1
+        self.faces_per_feature = {}
+        self.fail_delete = False
+        self.foreign_on_build = False
+        self.ext_refs = 0
+        self.import_kind = swb.SW_DOC_PART
+        self.built = []
+        self.rebuild_queue = []  # rebuild answers to give first, then rebuild_ok
 
     @property
     def ActiveDoc(self):
@@ -569,7 +581,7 @@ class FakeSession:
         return [dict(e) for e in self.eqs]
 
     def feature_list(self, doc):
-        return [{"name": "Boss-Extrude1", "type": "Extrusion"}, {"name": "Sketch1", "type": "ProfileFeature"}]
+        return [dict(f) for f in self.features]
 
     def feature_errors(self, doc):
         return list(self.feature_failures)
@@ -595,6 +607,8 @@ class FakeSession:
         self.eqs[index]["text"] = text
 
     def rebuild(self, doc):
+        if self.rebuild_queue:
+            return self.rebuild_queue.pop(0)
         return self.rebuild_ok
 
     def save_copy(self, doc, new_path):
@@ -607,6 +621,76 @@ class FakeSession:
 
     def save(self, doc):
         return {"ok": True, "errors": 0, "warnings": 0}
+
+    # building ----------------------------------------------------------------
+
+    def bodies(self, doc):
+        return None if self.body_list is None else [dict(b) for b in self.body_list]
+
+    def faces(self, doc):
+        return [{"name": "Body", "face_count": 1, "faces": [{"surface": "CYLINDER", "radius_m": 0.005, "area_m2": 1e-4}]}]
+
+    def external_reference_count(self, doc):
+        return self.ext_refs
+
+    def edges_at(self, doc, point):
+        return self.edge_hits
+
+    def part_template(self):
+        if not self.template:
+            raise swb.ToolError("No usable part template. Nothing was created.")
+        return self.template
+
+    def new_part(self, template):
+        self.features = [{"name": n, "type": "RefPlane"} for n in ("Front Plane", "Top Plane", "Right Plane")]
+        self.body_list = []
+        self.doc = FakeDoc("", "Part1")
+        return self.doc
+
+    def save_as(self, doc, new_path):
+        Path(new_path).write_bytes(b"new part")
+        doc.path = new_path
+        return {"ok": True, "errors": 0, "warnings": 0}
+
+    def import_step(self, path):
+        self.features = [{"name": "Imported1", "type": "BaseBody"}]
+        self.body_list = [{"name": "Imported1", "face_count": 12}]
+        self.doc = FakeDoc("", "customer", kind=self.import_kind)
+        return self.doc
+
+    def plane_feature(self, doc, plane):
+        return plane if any(f["name"] == f"{plane} Plane" for f in self.features) else None
+
+    def _add(self, name, kind):
+        self.features.append({"name": name, "type": kind})
+        if self.foreign_on_build:
+            self.features.append({"name": "Mystery1", "type": "Extrusion"})
+        self.built.append(name)
+        return name
+
+    def sketch(self, doc, plane, entities):
+        self._add(f"Sketch{len(self.built) + 1}", "ProfileFeature")
+
+    def extrude(self, doc, spec):
+        name = self._add(f"{'Cut' if spec['operation'] == 'REMOVE' else 'Boss'}-Extrude{len(self.built) + 1}", "Extrusion")
+        if spec["operation"] == "NEW":
+            self.body_list.append({"name": name, "face_count": 6})
+        return name
+
+    def fillet(self, doc, spec):
+        return self._add(f"Fillet{len(self.built) + 1}", "Fillet")
+
+    def chamfer(self, doc, spec):
+        return self._add(f"Chamfer{len(self.built) + 1}", "Chamfer")
+
+    def feature_face_count(self, doc, name):
+        return self.faces_per_feature.get(name, 99)
+
+    def delete_feature(self, doc, name):
+        if self.fail_delete:
+            return False
+        self.features = [f for f in self.features if f["name"] != name]
+        return True
 
 
 class SolidWorksGuardTests(unittest.TestCase):
@@ -812,12 +896,12 @@ class SolidWorksGuardTests(unittest.TestCase):
         self.assertIn("Discard it", value["error"])
         self.assertIn("retired", json.loads(self.state.read_text("utf-8"))["copies"][swb.normalise(str(copy))])
 
-    def test_read_parameters_lists_features_and_says_what_it_cannot_check(self):
+    def test_read_parameters_lists_features_and_points_to_the_integrity_check(self):
         value, is_error = call(self.server, "sw_read_parameters")
         self.assertFalse(is_error, value)
         self.assertEqual([f["type"] for f in value["features"]], ["Extrusion", "ProfileFeature"])
-        self.assertIn("not_checked", value["integrity_note"])
-        self.assertIn("unknown", value["integrity_note"])
+        self.assertIn("sw_list_contents", value["integrity_note"])
+        self.assertIn("clean only when", value["integrity_note"])
 
     def test_untouched_check_when_the_base_is_gone(self):
         self.make_copy()
@@ -836,3 +920,461 @@ class SolidWorksGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# SOLIDWORKS: building from a drawing, STEP import, contents
+# ---------------------------------------------------------------------------
+
+
+class SolidWorksBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.base = self.dir / "Bracket.SLDPRT"
+        self.base.write_bytes(b"solid part bytes")
+        self.session = FakeSession(FakeDoc(str(self.base), "Bracket.SLDPRT"))
+        self.state = self.dir / "state.json"
+        self.server = swb.build_server(lambda: self.session, swb.ProtectedFiles(self.state))
+        self.part = str(self.dir / "EH-RFQ-0912_L1_PN-4471-B_R2.SLDPRT")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def new_part(self):
+        value, is_error = call(self.server, "sw_new_part", {"new_path": self.part})
+        self.assertFalse(is_error, value)
+        return value
+
+    def add(self, kind, spec, path=None):
+        return call(self.server, "sw_add_feature", {"expected_path": path or self.part, "kind": kind, "spec": spec})
+
+    def test_build_from_scratch_sketch_extrude_cut_fillet_chamfer(self):
+        made = self.new_part()
+        self.assertEqual(made["contents"]["bodies"], [])
+        sketch, is_error = self.add("sketch", {"plane": "Top", "entities": [{"type": "rectangle", "x1": 0, "y1": 0, "x2": 50, "y2": 30}]})
+        self.assertFalse(is_error, sketch)
+        self.assertEqual(sketch["document_integrity"]["result"], "clean")
+        boss, is_error = self.add("extrude", {"sketch_name": sketch["feature"], "depth_mm": 10})
+        self.assertFalse(is_error, boss)
+        self.assertEqual(len(boss["document_integrity"]["after"]["bodies"]), 1)
+        hole_sketch, _ = self.add("sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 25, "cy": 15, "radius": 4}]})
+        cut, is_error = self.add("extrude", {"sketch_name": hole_sketch["feature"], "operation": "REMOVE", "end": "THROUGH_ALL"})
+        self.assertFalse(is_error, cut)
+        fillet, is_error = self.add("fillet", {"edge_points_mm": [[0, 15, 10], [50, 15, 10]], "radius_mm": 2})
+        self.assertFalse(is_error, fillet)
+        chamfer, is_error = self.add("chamfer", {"edge_points_mm": [[25, 0, 0]], "distance_mm": 0.5})
+        self.assertFalse(is_error, chamfer)
+        self.assertEqual(chamfer["document_integrity"]["result"], "clean")
+        record = json.loads(self.state.read_text("utf-8"))["copies"][swb.normalise(self.part)]
+        self.assertEqual(record["kind"], "created")
+        self.assertNotIn("retired", record)
+
+    def test_new_part_refuses_an_existing_path_and_a_missing_template(self):
+        Path(self.part).write_bytes(b"someone's file")
+        value, is_error = call(self.server, "sw_new_part", {"new_path": self.part})
+        self.assertTrue(is_error)
+        self.assertIn("already exists", value["error"])
+        self.assertEqual(Path(self.part).read_bytes(), b"someone's file")
+        self.session.template = None
+        value, is_error = call(self.server, "sw_new_part", {"new_path": str(self.dir / "Other.SLDPRT")})
+        self.assertTrue(is_error)
+        self.assertIn("template", value["error"])
+
+    def test_building_in_a_file_the_bridge_did_not_make_is_refused(self):
+        before = list(self.session.features)
+        value, is_error = self.add("sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 1}]}, str(self.base))
+        self.assertTrue(is_error)
+        self.assertIn("not a copy this bridge made", value["error"])
+        self.assertEqual(self.session.features, before)
+        self.assertEqual(self.base.read_bytes(), b"solid part bytes")
+
+    def test_bad_spec_is_refused_before_any_change(self):
+        self.new_part()
+        before = list(self.session.features)
+        for kind, spec in [
+            ("sketch", {"plane": "Diagonal", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 1}]}),
+            ("sketch", {"plane": "Top", "entities": [{"type": "rectangle", "x1": 0, "y1": 0, "x2": 0, "y2": 5}]}),
+            ("extrude", {"sketch_name": "Sketch9", "depth_mm": float("nan")}),
+            ("extrude", {"sketch_name": "Sketch9", "depth_mm": 5}),
+            ("fillet", {"edge_points_mm": [[1, 2]], "radius_mm": 1}),
+            ("chamfer", {"edge_points_mm": [[1, 2, 3]], "distance_mm": -1}),
+        ]:
+            value, is_error = self.add(kind, spec)
+            self.assertTrue(is_error, (kind, spec))
+            self.assertIn("Nothing was changed", value["error"])
+        self.assertEqual(self.session.features, before)
+
+    def test_fillet_point_on_no_edge_or_two_edges_is_refused(self):
+        self.new_part()
+        for hits in (0, 2):
+            self.session.edge_hits = hits
+            value, is_error = self.add("fillet", {"edge_points_mm": [[0, 0, 10]], "radius_mm": 1})
+            self.assertTrue(is_error)
+            self.assertIn(f"{hits} edges", value["error"])
+        self.assertEqual(self.session.built, [])
+
+    def test_failed_rebuild_deletes_the_feature_again(self):
+        self.new_part()
+        sketch, _ = self.add("sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        before = list(self.session.features)
+        self.session.rebuild_queue = [False]  # the extrude's rebuild fails; the rebuild after deleting it succeeds
+        value, is_error = self.add("extrude", {"sketch_name": sketch["feature"], "depth_mm": 5})
+        self.assertTrue(is_error)
+        self.assertIn("deleted again", value["error"])
+        self.assertEqual(self.session.features, before)
+
+    def test_fillet_that_misses_an_edge_is_deleted_again(self):
+        self.new_part()
+        self.session.faces_per_feature = {"Fillet1": 1}
+        before = list(self.session.features)
+        value, is_error = self.add("fillet", {"edge_points_mm": [[0, 0, 10], [5, 0, 10]], "radius_mm": 1})
+        self.assertTrue(is_error)
+        self.assertIn("1 face(s) for 2 edge(s)", value["error"])
+        self.assertEqual(self.session.features, before)
+
+    def test_failed_delete_retires_the_part(self):
+        self.new_part()
+        self.session.rebuild_ok = False
+        self.session.fail_delete = True
+        value, is_error = self.add("sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("unknown state", value["error"])
+        self.session.rebuild_ok, self.session.fail_delete = True, False
+        value, is_error = self.add("sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("unknown state", value["error"])
+
+    def test_foreign_feature_fails_the_step_and_retires_the_part(self):
+        self.new_part()
+        self.session.foreign_on_build = True
+        value, is_error = self.add("sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("Mystery1", value["error"])
+        self.assertIn("retired", json.loads(self.state.read_text("utf-8"))["copies"][swb.normalise(self.part)])
+
+    def test_unreadable_bodies_make_integrity_not_checked_and_block_building(self):
+        self.new_part()
+        self.session.body_list = None
+        value, is_error = self.add("sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("cannot be checked", value["error"])
+        self.assertEqual(swb.integrity_compare({"features": [], "bodies": None}, {"features": [], "bodies": []}, [])["result"], "not_checked")
+
+    def test_import_step_to_a_new_part(self):
+        step = self.dir / "customer.step"
+        step.write_bytes(b"ISO-10303-21;")
+        value, is_error = call(self.server, "sw_import_step", {"step_path": str(step), "new_path": self.part})
+        self.assertFalse(is_error, value)
+        self.assertEqual(value["origin"], "customer_step")
+        self.assertEqual(value["bodies"][0]["name"], "Imported1")
+        self.assertEqual(step.read_bytes(), b"ISO-10303-21;")
+        record = json.loads(self.state.read_text("utf-8"))["copies"][swb.normalise(self.part)]
+        self.assertEqual(record["kind"], "imported")
+        self.assertEqual(record["source_sha256"], hashlib.sha256(b"ISO-10303-21;").hexdigest())
+        faces, is_error = call(self.server, "sw_read_faces")
+        self.assertFalse(is_error, faces)
+        self.assertEqual(faces["bodies"][0]["faces"][0]["surface"], "CYLINDER")
+
+    def test_import_refuses_other_files_and_assemblies(self):
+        text = self.dir / "customer.txt"
+        text.write_bytes(b"x")
+        value, is_error = call(self.server, "sw_import_step", {"step_path": str(text), "new_path": self.part})
+        self.assertTrue(is_error)
+        self.assertIn(".step", value["error"])
+        step = self.dir / "assembly.stp"
+        step.write_bytes(b"ISO-10303-21;")
+        self.session.import_kind = swb.SW_DOC_ASSEMBLY
+        value, is_error = call(self.server, "sw_import_step", {"step_path": str(step), "new_path": self.part})
+        self.assertTrue(is_error)
+        self.assertIn("assembly", value["error"])
+        self.assertFalse(Path(self.part).exists())
+
+    def test_list_contents_reports_external_references_and_unknown(self):
+        value, _ = call(self.server, "sw_list_contents")
+        self.assertIs(value["external_references"]["present"], False)
+        self.assertEqual(value["sketches"], ["Sketch1"])
+        self.session.ext_refs = 2
+        self.assertIs(call(self.server, "sw_list_contents")[0]["external_references"]["present"], True)
+        self.session.ext_refs = None
+        self.assertIsNone(call(self.server, "sw_list_contents")[0]["external_references"]["present"])
+
+
+# ---------------------------------------------------------------------------
+# Onshape: new documents, building from a drawing, STEP import, contents
+# ---------------------------------------------------------------------------
+
+
+class FakeStudio:
+    """A stateful Onshape: documents, one Part Studio each, a feature list that grows and shrinks."""
+
+    def __init__(self):
+        self.docs = {"base": {"name": "Bracket", "wid": "wb", "studios": {"eb": {"features": [], "bodies": [{"id": "B1"}]}}}}
+        self.calls = []
+        self.status = "OK"
+        self.edge_count = 1
+        self.faces_made = 2
+        self.fail_delete = False
+        self.foreign_on_add = False
+        self.bodies_missing = False
+        self.translation_states = ["ACTIVE", "DONE"]
+        self.next_id = 0
+
+    def _id(self, prefix):
+        self.next_id += 1
+        return f"{prefix}{self.next_id}"
+
+    def __call__(self, method, url, headers, body):
+        path = url.split("/api/v10", 1)[1].split("?", 1)[0]
+        try:
+            parsed = json.loads(body) if body else None
+        except ValueError:
+            parsed = body
+        self.calls.append((method, path, parsed, headers))
+        parts = path.strip("/").split("/")
+
+        def ok(payload):
+            return 200, {}, json.dumps(payload).encode()
+
+        if method == "POST" and path == "/documents":
+            did = self._id("d")
+            self.docs[did] = {"name": parsed["name"], "wid": "w" + did, "studios": {"e" + did: {"features": [], "bodies": []}}}
+            return ok({"id": did, "name": parsed["name"], "defaultWorkspace": {"id": "w" + did}})
+        if method == "GET" and parts[0] == "documents" and len(parts) == 2:
+            return ok({"name": self.docs[parts[1]]["name"]})
+        if method == "GET" and parts[0] == "documents" and parts[-1] == "elements":
+            return ok([{"id": eid, "elementType": "PARTSTUDIO"} for eid in self.docs[parts[2]]["studios"]])
+        if parts[0] == "partstudios":
+            studio = self.docs[parts[2]]["studios"][parts[6]]
+            tail = parts[7:]
+            if method == "GET" and tail == ["features"]:
+                states = {f["featureId"]: {"featureStatus": f.get("status", "OK")} for f in studio["features"]}
+                return ok({"features": studio["features"], "featureStates": states, "sourceMicroversion": "mv", "serializationVersion": "1"})
+            if method == "GET" and tail == ["bodydetails"]:
+                if self.bodies_missing:
+                    return ok({})
+                return ok({"bodies": [dict(b, faces=[{"id": "F1", "area": 1e-4, "surface": {"type": "CYLINDER", "radius": 0.004}}]) for b in studio["bodies"]]})
+            if method == "POST" and tail == ["features"]:
+                feature = dict(parsed["feature"], featureId=self._id("F"), status=self.status)
+                studio["features"].append(feature)
+                if self.foreign_on_add:
+                    studio["features"].append({"featureId": "X1", "name": "Mystery", "featureType": "extrude"})
+                if feature["featureType"] == "extrude" and self.status == "OK":
+                    studio["bodies"].append({"id": "B" + feature["featureId"]})
+                return ok({"feature": {"featureId": feature["featureId"]}, "featureState": {"featureStatus": self.status}})
+            if method == "DELETE" and tail[:2] == ["features", "featureid"]:
+                if self.fail_delete:
+                    return 500, {}, b"{}"
+                studio["features"] = [f for f in studio["features"] if f["featureId"] != tail[2]]
+                return ok({})
+            if method == "POST" and tail == ["featurescript"]:
+                value = self.faces_made if "qCreatedBy" in parsed["script"] else self.edge_count
+                return ok({"result": {"btType": "BTFSValueNumber", "value": value}})
+        if method == "POST" and parts[0] == "translations":
+            self.upload = parsed
+            return ok({"id": "t1", "requestState": "ACTIVE"})
+        if method == "GET" and path == "/translations/t1":
+            state = self.translation_states.pop(0) if self.translation_states else "DONE"
+            if state == "DONE":
+                did = [d for d in self.docs if d != "base"][-1]
+                self.docs[did]["studios"]["eimp"] = {"features": [{"featureId": "I1", "name": "Imported", "featureType": "importForeign"}], "bodies": [{"id": "BI"}]}
+                return ok({"requestState": "DONE", "resultElementIds": ["blob1", "eimp"]})
+            return ok({"requestState": state, "failureReason": "bad file" if state == "FAILED" else None})
+        return 404, {}, b"{}"
+
+
+class OnshapeBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name) / "protected.json"
+        self.fake = FakeStudio()
+        self.server = osb.build_server(
+            lambda: osb.OnshapeClient("a", "s", transport=self.fake, sleep=lambda _: None), osb.ProtectedDocuments(self.state)
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def new_document(self):
+        value, is_error = call(self.server, "onshape_create_document", {"name": "EH-RFQ-0912_L1_PN-4471-B_R2"})
+        self.assertFalse(is_error, value)
+        return value
+
+    def add(self, doc, kind, spec):
+        return call(self.server, "onshape_add_feature", {
+            "document_id": doc["document_id"], "workspace_id": doc["workspace_id"], "element_id": doc["element_id"],
+            "expected_document_name": doc["name"], "kind": kind, "spec": spec,
+        })
+
+    def studio(self, doc):
+        return self.fake.docs[doc["document_id"]]["studios"][doc["element_id"]]
+
+    def test_build_from_scratch_sketch_extrude_cut_fillet_chamfer(self):
+        doc = self.new_document()
+        sketch, is_error = self.add(doc, "sketch", {"plane": "Top", "entities": [{"type": "rectangle", "x1": 0, "y1": 0, "x2": 50, "y2": 30}]})
+        self.assertFalse(is_error, sketch)
+        posted = [c for c in self.fake.calls if c[0] == "POST" and c[1].endswith("/features")][-1][2]["feature"]
+        self.assertEqual(posted["btType"], "BTMSketch-151")
+        self.assertEqual(len(posted["entities"]), 4)
+        self.assertAlmostEqual(posted["entities"][1]["geometry"]["pntX"], 0.05)
+        boss, is_error = self.add(doc, "extrude", {"sketch_feature_id": sketch["feature_id"], "depth_mm": 10})
+        self.assertFalse(is_error, boss)
+        self.assertEqual(boss["document_integrity"]["result"], "clean")
+        hole, _ = self.add(doc, "sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 25, "cy": 15, "radius": 4}]})
+        cut, is_error = self.add(doc, "extrude", {"sketch_feature_id": hole["feature_id"], "operation": "REMOVE", "end": "THROUGH_ALL"})
+        self.assertFalse(is_error, cut)
+        fillet, is_error = self.add(doc, "fillet", {"edge_points_mm": [[0, 15, 10], [50, 15, 10]], "radius_mm": 2})
+        self.assertFalse(is_error, fillet)
+        self.assertEqual(fillet["faces_made"], 2)
+        chamfer, is_error = self.add(doc, "chamfer", {"edge_points_mm": [[25, 0, 0]], "distance_mm": 0.5})
+        self.assertFalse(is_error, chamfer)
+        self.assertEqual(len(self.studio(doc)["features"]), 6)
+        record = json.loads(self.state.read_text("utf-8"))["copies"][doc["document_id"]]
+        self.assertEqual(record["kind"], "created")
+        self.assertNotIn("retired", record)
+
+    def test_building_in_a_document_the_bridge_did_not_make_is_refused(self):
+        value, is_error = self.add(
+            {"document_id": "base", "workspace_id": "wb", "element_id": "eb", "name": "Bracket"},
+            "sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 1}]},
+        )
+        self.assertTrue(is_error)
+        self.assertIn("not a copy this bridge made", value["error"])
+        self.assertEqual(self.fake.docs["base"]["studios"]["eb"]["features"], [])
+
+    def test_bad_spec_is_refused_before_any_write(self):
+        doc = self.new_document()
+        for kind, spec in [
+            ("sketch", {"plane": "Diagonal", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 1}]}),
+            ("sketch", {"plane": "Top", "entities": [{"type": "line", "x1": 1, "y1": 1, "x2": 1, "y2": 1}]}),
+            ("extrude", {"sketch_feature_id": "F9", "depth_mm": float("inf")}),
+            ("extrude", {"sketch_feature_id": "F9", "depth_mm": 5}),
+            ("fillet", {"edge_points_mm": [], "radius_mm": 1}),
+            ("chamfer", {"edge_points_mm": [[0, 0, 0]], "distance_mm": 0}),
+        ]:
+            value, is_error = self.add(doc, kind, spec)
+            self.assertTrue(is_error, (kind, spec))
+            self.assertIn("Nothing was written", value["error"])
+        self.assertFalse([c for c in self.fake.calls if c[0] == "POST" and c[1].endswith("/features")])
+
+    def test_fillet_point_on_no_edge_or_two_edges_is_refused(self):
+        doc = self.new_document()
+        for hits in (0, 2):
+            self.fake.edge_count = hits
+            value, is_error = self.add(doc, "fillet", {"edge_points_mm": [[0, 0, 10]], "radius_mm": 1})
+            self.assertTrue(is_error)
+            self.assertIn(f"{hits} edges", value["error"])
+        self.assertEqual(self.studio(doc)["features"], [])
+
+    def test_failed_feature_is_deleted_again(self):
+        doc = self.new_document()
+        self.fake.status = "ERROR"
+        value, is_error = self.add(doc, "sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("deleted again", value["error"])
+        self.assertEqual(self.studio(doc)["features"], [])
+
+    def test_fillet_that_misses_an_edge_is_deleted_again(self):
+        doc = self.new_document()
+        self.fake.faces_made = 1
+        value, is_error = self.add(doc, "fillet", {"edge_points_mm": [[0, 0, 10], [5, 0, 10]], "radius_mm": 1})
+        self.assertTrue(is_error)
+        self.assertIn("1 face(s) for 2 edge(s)", value["error"])
+        self.assertEqual(self.studio(doc)["features"], [])
+
+    def test_failed_delete_retires_the_document(self):
+        doc = self.new_document()
+        self.fake.status, self.fake.fail_delete = "ERROR", True
+        value, is_error = self.add(doc, "sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("unknown state", value["error"])
+        self.fake.status, self.fake.fail_delete = "OK", False
+        value, is_error = self.add(doc, "sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("unknown state", value["error"])
+
+    def test_foreign_feature_fails_the_step_and_retires_the_document(self):
+        doc = self.new_document()
+        self.fake.foreign_on_add = True
+        value, is_error = self.add(doc, "sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertTrue(is_error)
+        self.assertIn("X1", value["error"])
+        self.assertIn("retired", json.loads(self.state.read_text("utf-8"))["copies"][doc["document_id"]])
+
+    def test_missing_body_list_makes_integrity_not_checked(self):
+        doc = self.new_document()
+        self.fake.bodies_missing = True
+        value, is_error = self.add(doc, "sketch", {"plane": "Top", "entities": [{"type": "circle", "cx": 0, "cy": 0, "radius": 5}]})
+        self.assertFalse(is_error, value)
+        self.assertEqual(value["document_integrity"]["result"], "not_checked")
+
+    def test_new_document_that_is_not_empty_is_not_used(self):
+        original = self.fake.__call__
+
+        def seeded(method, url, headers, body):
+            answer = original(method, url, headers, body)
+            if method == "POST" and url.endswith("/documents"):
+                did = json.loads(answer[2])["id"]
+                self.fake.docs[did]["studios"]["e" + did]["features"].append({"featureId": "Z", "name": "Replayed", "featureType": "extrude"})
+            return answer
+
+        self.server = osb.build_server(
+            lambda: osb.OnshapeClient("a", "s", transport=seeded, sleep=lambda _: None), osb.ProtectedDocuments(self.state)
+        )
+        value, is_error = call(self.server, "onshape_create_document", {"name": "N"})
+        self.assertTrue(is_error)
+        self.assertIn("not empty", value["error"])
+
+    def test_import_step_into_a_new_document(self):
+        step = Path(self.tmp.name) / "customer.step"
+        step.write_bytes(b"ISO-10303-21;")
+        value, is_error = call(self.server, "onshape_import_step", {"file_path": str(step), "name": "EH-RFQ-0912_L1_customer"})
+        self.assertFalse(is_error, value)
+        self.assertEqual(value["state"], "DONE")
+        self.assertEqual(value["element_id"], "eimp")
+        self.assertEqual(value["origin"], "customer_step")
+        self.assertIn(b"ISO-10303-21;", self.fake.upload)
+        self.assertIn(b'name="translate"', self.fake.upload)
+        upload_headers = [c[3] for c in self.fake.calls if c[1].startswith("/translations/d/")][0]
+        self.assertTrue(upload_headers["Content-Type"].startswith("multipart/form-data; boundary="))
+        faces, is_error = call(self.server, "onshape_read_faces", {"document_id": value["document_id"], "wvm": "w", "wvm_id": value["workspace_id"], "element_id": "eimp"})
+        self.assertFalse(is_error, faces)
+        self.assertEqual(faces["bodies"][0]["faces"][0]["radius_m"], 0.004)
+
+    def test_import_still_running_then_status_finishes_it(self):
+        self.fake.translation_states = ["ACTIVE"] * 40 + ["DONE"]
+        step = Path(self.tmp.name) / "customer.stp"
+        step.write_bytes(b"ISO-10303-21;")
+        value, is_error = call(self.server, "onshape_import_step", {"file_path": str(step), "name": "N"})
+        self.assertFalse(is_error, value)
+        self.assertEqual(value["state"], "ACTIVE")
+        value, is_error = call(self.server, "onshape_import_status", {"document_id": value["document_id"]})
+        self.assertFalse(is_error, value)
+        self.assertEqual(value["state"], "DONE")
+
+    def test_failed_import_retires_the_document_and_other_files_are_refused(self):
+        self.fake.translation_states = ["FAILED"]
+        step = Path(self.tmp.name) / "customer.step"
+        step.write_bytes(b"ISO-10303-21;")
+        value, is_error = call(self.server, "onshape_import_step", {"file_path": str(step), "name": "N"})
+        self.assertTrue(is_error)
+        self.assertIn("bad file", value["error"])
+        copies = json.loads(self.state.read_text("utf-8"))["copies"]
+        self.assertTrue(all("retired" in r for r in copies.values()))
+        text = Path(self.tmp.name) / "notes.txt"
+        text.write_bytes(b"x")
+        value, is_error = call(self.server, "onshape_import_step", {"file_path": str(text), "name": "N"})
+        self.assertTrue(is_error)
+        self.assertIn(".step", value["error"])
+
+    def test_external_references_from_the_feature_list(self):
+        self.assertIs(osb.external_references({"features": [{"featureType": "extrude", "parameters": []}]})["present"], False)
+        derived = {"features": [{"featureType": "importDerived", "name": "Derived 1"}]}
+        self.assertEqual(osb.external_references(derived)["found"][0]["kind"], "derived")
+        in_context = {"features": [{"featureType": "extrude", "name": "E", "parameters": [{"btType": "BTMParameterReferencePartStudio-3302"}]}]}
+        self.assertIs(osb.external_references(in_context)["present"], True)
+        self.assertIsNone(osb.external_references(None)["present"])
+        value, is_error = call(self.server, "onshape_list_contents", {"document_id": "base", "wvm": "w", "wvm_id": "wb", "element_id": "eb"})
+        self.assertFalse(is_error, value)
+        self.assertEqual(value["bodies"][0]["body_id"], "B1")
+        self.assertIs(value["external_references"]["present"], False)

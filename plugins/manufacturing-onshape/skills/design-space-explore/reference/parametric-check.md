@@ -52,10 +52,10 @@ Also check, once, for the model as a whole:
   referenced and that variant generation can break it, so the engineer can
   decide whether to proceed with that risk understood rather than discover
   a broken assembly reference after the batch runs.
-  **The Onshape bridge cannot read external references yet.** Record
-  `external_references_present: unknown`, never `false`, and tell the
-  engineer before generating that they were not checked, so they can say
-  whether the model has any.
+  The Onshape bridge reads them with `onshape_list_contents` (unverified), and says what it
+  scanned. Record `true` or `false` as it returns them; where it cannot
+  tell, record `external_references_present: unknown`, never `false`, and
+  tell the engineer before generating that they were not checked.
 
 ---
 

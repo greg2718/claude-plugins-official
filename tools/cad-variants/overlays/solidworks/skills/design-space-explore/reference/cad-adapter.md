@@ -10,12 +10,12 @@ Three callers use this file:
 - **`design-space-explore`** — variants of an existing model. It reads
   parameters, applies parameter sets, reads properties and creates variant
   files. **It never designs from scratch.**
-- **`rfq-to-quote`, step 7** — the design step. Path B adapts a prior part's
-  model with the same copy, apply and untouched-check mechanism
-  `design-space-explore` uses — `adapt-prior-model.md`. Paths C2 and A (build
-  from scratch) and C1 (STEP import) are **not implemented by the bridge in this
-  version**: they take the hand-entered feature list, as when no CAD is
-  connected. See *What this version does not do*.
+- **`rfq-to-quote`, step 7** — the design step. Path C2 (a drawing) and path A
+  (text specs) build an estimating model in a **new part** with the
+  create-from-scratch tools below. Path B adapts a prior part's model with the
+  same copy, apply and untouched-check mechanism `design-space-explore` uses —
+  `adapt-prior-model.md`. Path C1 imports a customer's STEP file into a new
+  part and reads it. All three are **unverified** on a live SOLIDWORKS session.
 - **`quote-build`, the CAM path** — **not available in this edition.** Hours
   come from the feature path. See *What this version does not do*.
 
@@ -37,7 +37,10 @@ there through the SOLIDWORKS API (COM).
   `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`).
 - **The bridge has not been run against a live SOLIDWORKS session.** Its
   method names, signatures and enum values were checked against the SOLIDWORKS
-  API Help; its behaviour was not. Every tool says so. Say so in every output
+  API Help (the feature-building calls against a markdown copy of it, because
+  the Help site renders only in a browser); its behaviour was not. The one value
+  not confirmed is the number for `swDefaultTemplatePart` (8); the template path
+  it returns is checked before use, and `SOLIDWORKS_PART_TEMPLATE` overrides it. Every tool says so. Say so in every output
   that came from it until a run on a real model has been recorded here.
 
 | Bridge tool | Adapter operation | SOLIDWORKS API it uses |
@@ -50,6 +53,11 @@ there through the SOLIDWORKS API (COM).
 | `sw_apply_parameters` | Check the whole set, apply it, undo it if a change fails, regenerate | `IModelDoc2::Parameter` → `IDimension::SetSystemValue3` (this configuration); `IEquationMgr::Equation` (set); `IModelDoc2::ForceRebuild3`, whose return value is checked |
 | `sw_save_active` | Save the variant file | `IModelDoc2::Save3` |
 | `sw_check_base_untouched` | Confirm the base did not move | SHA-256 of the base file against the one recorded |
+| `sw_new_part` | Create a new part for an estimating model, and register it as a file the bridge writes. Checks it holds no sketch and no body | `ISldWorks::GetUserPreferenceStringValue` (default part template) or `SOLIDWORKS_PART_TEMPLATE`; `ISldWorks::NewDocument`; `IModelDocExtension::SaveAs3` |
+| `sw_add_feature` | One sketch, extrude, cut, fillet or chamfer, checked before and after, deleted again on failure | `ISketchManager::InsertSketch`, `CreateCornerRectangle`, `CreateCircleByRadius`, `CreateLine`; `IFeatureManager::FeatureExtrusion3`, `FeatureCut4`, `FeatureFillet3`, `InsertFeatureChamfer`; `IModelDocExtension::SelectByID2`; `IEdge::GetClosestPointOn`; `IFeature::GetFaceCount`; `IModelDoc2::EditDelete` |
+| `sw_import_step` | Import a customer's STEP file as a new part, and register it | `ISldWorks::LoadFile4`; `IModelDocExtension::SaveAs3` |
+| `sw_list_contents` | The integrity check: features, sketches, bodies, external references | The feature list; `IPartDoc::GetBodies2`; `IModelDocExtension::ListExternalFileReferenceCount` |
+| `sw_read_faces` | Read bodies and faces of a part | `IBody2::GetFaces`; `IFace2::GetArea`, `GetSurface`; `ISurface::IsPlane`, `PlaneParams`, `IsCylinder`, `CylinderParams` |
 
 **Units.** The API works in SI: metres and radians. `sw_read_parameters`
 returns SI values and `sw_apply_parameters` takes them. Convert from the
@@ -108,20 +116,45 @@ here checks a file in or out, changes a state, or adds a file to the vault.
 
 ---
 
-## What this version does not do
+### Create-from-scratch operations — `rfq-to-quote` step 7, paths C2 and A
 
-Said plainly, so nobody finds out in a demo:
+Always in a **new part the step creates itself** with `sw_new_part`, named for
+the inquiry, line and revision (`<inquiry>_L<line>_<part>_R<rev>.SLDPRT`).
+Never in a part that holds anything else, and never in a customer's file: the
+bridge refuses to build in any file it did not make. Report the new part's path.
+
+| Operation | Bridge call | Notes |
+|---|---|---|
+| Create sketch | `sw_add_feature`, kind `sketch` | On the Front, Top or Right plane; rectangles, circles and lines in millimetres, each dimension from the drawing with its view and zone. The plane must be named "Front Plane", "Top Plane" or "Right Plane"; a template that names them otherwise is refused, not guessed |
+| Extrude | kind `extrude`, operation `NEW` or `ADD` | Stock and the main prismatic form; `BLIND` with a depth, or `THROUGH_ALL` |
+| Hole / cut | kind `extrude`, operation `REMOVE` | A through hole is a circle cut `THROUGH_ALL`; a pocket or blind bore is `BLIND`. The Hole Wizard is not used: a counterbore is two cuts, and a thread is recorded as a note, not modelled |
+| Fillet | kind `fillet`: one point on each edge, and the radius | Each point must lie on exactly one solid edge, checked before the fillet; after it, the fillet must own a face per edge |
+| Chamfer | kind `chamfer`: one point on each edge, and the distance | Equal distance. A "break all edges" note is a chamfer set, cited to the note |
+| Read back | `sw_read_properties`, `sw_list_contents` | Bodies, volume; checked against a hand calculation from the drawing. The bounding box is approximate: never the read-back |
+
+Path A uses the same calls with dimensions read from text. Anything else —
+threads, lofts, sheet metal — is not built: hand-enter it beside the model and
+say so.
+
+### STEP import — `rfq-to-quote` path C1
+
+| Operation | Bridge call | Notes |
+|---|---|---|
+| Import STEP to a new part | `sw_import_step` with the STEP path and a new `.SLDPRT` path | The STEP file is read, never changed, and its SHA-256 recorded. A STEP that opens as an assembly is refused. The file has to be on the machine running SOLIDWORKS |
+| Read bodies and faces | `sw_read_faces`, `sw_read_properties` | Read-only. A STEP file carries bodies, not a feature history: holes and pockets are recognised from cylindrical and planar faces, and each one is a reading to confirm at Gate 3 |
+
+**Nothing is generated on path C1** — no sketch, no extrude, no change to the
+imported bodies. Where the import fails, `rfq-to-quote` reads the STEP file as
+text without CAD, labelled unverified, or takes a hand-entered feature list.
+
+---
+
+## What this version does not do
 
 | Caller | Upstream behaviour | In this edition |
 |---|---|---|
-| `rfq-to-quote` path C2 (build from the drawing) and path A (from text) | Builds an estimating model feature by feature | **Not implemented.** The bridge has no create-from-scratch tools yet. Step 7 offers the hand-entered feature list, prefilled from the drawing as read, exactly as when no CAD is connected, and says why: *"SOLIDWORKS connected; the bridge does not build models from drawings yet. Hand-entered feature list."* |
-| `rfq-to-quote` path C1 (STEP import) | Imports into CAD and reads the bodies | **Not implemented.** The STEP is read as text without CAD (unverified), else a hand-entered list. An engineer can still import it in SOLIDWORKS themselves and save it; reading that saved file with `sw_read_properties` is a read, and is labelled as reading a model the engineer imported |
-| `quote-build` CAM path | Toolpaths and machining time | **Not available.** SOLIDWORKS CAM is not driven from here. Hours come from the feature path; the internal sheet says *"feature path only: no CAM connection in this edition."* |
-
-The SOLIDWORKS API can do all three (feature creation through
-`IFeatureManager` and `ISketchManager`, STEP import through
-`ISldWorks::LoadFile4`); adding them to the bridge is the next piece of work,
-and each one needs the same before-and-after integrity check as below.
+| `quote-build` CAM path | Setups, operations, toolpaths, toolpath points and machining time | **Not available.** SOLIDWORKS CAM's automation interface is not part of the published SOLIDWORKS API Help, so there is nothing documented to build the bridge against. Hours come from the feature path; the internal sheet says *"feature path only: no CAM connection in this edition."* Toolpath verification by geometry goes with it |
+| Path C2 features beyond prismatic ones | Built if they work, said to be unverified | Not built: threads, lofts, sweeps, sheet metal. Hand-entered beside the model, and said so |
 
 ---
 
@@ -160,9 +193,15 @@ known to behave. **Read these before the first call.**
   it. If calls start timing out, ask the user to look at the SOLIDWORKS window.
 - **External references.** A part with in-context references to an assembly
   can change when the assembly does, and a copy keeps pointing at the
-  original's references. **The bridge cannot detect them yet.** Record
-  `external_references_present: unknown`, tell the engineer they were not
-  checked, and ask before generating.
+  original's references. `sw_list_contents` returns the count SOLIDWORKS
+  reports: record `external_references_present` as `true` or `false` from it,
+  and `unknown` when it returns none.
+- **Build coordinates are in millimetres; reads are in metres.** `sw_add_feature`
+  takes millimetres, as a drawing gives them, and converts; every read returns
+  SI. Sketch x and y are the sketch plane's own axes.
+- **Edges are named by a point on them.** A fillet or chamfer takes one point on
+  each edge, in model coordinates (millimetres). Pick the point mid-edge, away
+  from corners: a point at a corner touches two edges and is refused.
 - **One SOLIDWORKS session, one caller.** COM calls into SOLIDWORKS run one at
   a time. Do not run two batches at once.
 - **SOLIDWORKS must be open with the document active.** There is no file-only
@@ -175,9 +214,10 @@ known to behave. **Read these before the first call.**
 These hold whatever order the calls come in, because the bridge enforces them
 itself rather than relying on the steps being followed:
 
-- **It writes only to a copy it made.** `sw_apply_parameters` and
-  `sw_save_active` refuse every file that `sw_save_copy_and_open` did not
-  create, including a base that was never protected. Making a copy protects the
+- **It writes only to a file it made.** `sw_apply_parameters`,
+  `sw_add_feature` and `sw_save_active` refuse every file that
+  `sw_save_copy_and_open`, `sw_new_part` or `sw_import_step` did not create,
+  including a base that was never protected. Making a copy protects the
   original first if it is not protected yet. A copy of a copy is refused, so
   every variant starts from the base.
 - **It checks a whole parameter set before changing anything**: every
@@ -194,10 +234,12 @@ itself rather than relying on the steps being followed:
   bridge writes nothing until a person checks it and fixes or removes it
   (`%USERPROFILE%\.manufacturing-solidworks\protected.json` unless
   `SOLIDWORKS_BRIDGE_STATE` says otherwise).
-- **It cannot list bodies or external references yet.** It lists features
-  (sketches are features of type `ProfileFeature`). So the integrity check
-  compares feature lists and is recorded as `not_checked`, never `clean`, and
-  `external_references_present` is `unknown`, never `false`.
+- **Each build step is checked and undone on failure.** `sw_add_feature`
+  checks the whole step before changing anything. Afterwards the part must
+  rebuild, a fillet or chamfer must own a face per edge, and the feature list
+  must be the old one plus exactly this feature. Otherwise it deletes the
+  feature again and says so; if the delete fails, or features appear that this
+  step did not make, it stops writing to that file for good.
 
 ## Document integrity — before and after every design step
 
@@ -205,20 +247,21 @@ The bridge does not replay scripts the way the Fusion add-in can, but the
 check stays, because a write landing in the wrong document is the failure that
 costs most.
 
-1. **Before**, read-only: `sw_read_active_document` and `sw_read_parameters`.
-   The active path is the copy's, and its feature list is the base's, feature
-   for feature.
-2. Run the step.
-3. **After**, read-only: the active path is still the copy's; the feature list
-   is the base's plus only what this step created. `sw_check_base_untouched` on
-   the base.
-4. **Anything else fails the step.** Record the result in the geometry
-   estimate's `document_integrity`, or the variant's `status_detail`, with both
-   lists.
+1. **Before**, read-only: `sw_list_contents`. The active path is the expected
+   file's. A new part lists no sketch and no body; a copy lists the base's
+   features, feature for feature.
+2. Run the step. `sw_add_feature` runs this check itself for each feature and
+   returns it as `document_integrity`.
+3. **After**, read-only: `sw_list_contents` again. The features are the ones
+   before plus only what this step created, by name. `sw_check_base_untouched`
+   on any base.
+4. **Anything else is unexpected content and the step fails.** Record the
+   result in the geometry estimate's `document_integrity`, or the variant's
+   `status_detail`, with both lists.
 
-**Matching feature lists are recorded as `not_checked`, not `clean`**, with the
-reason: the bridge cannot list bodies or external references yet. "Not
-checked" is a result, and it is reported as one.
+The result is `clean` only when both reads returned features and bodies and
+they match. If SOLIDWORKS returned no body list, it is `not_checked`, with the
+reason. "Not checked" is a result, and it is reported as one.
 
 ---
 

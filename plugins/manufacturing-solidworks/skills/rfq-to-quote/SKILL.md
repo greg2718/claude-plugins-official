@@ -1,7 +1,7 @@
 ---
 name: rfq-to-quote
-description: "Runs the whole RFQ-to-quote chain end to end: reads the inquiry and its drawings, checks it against what the plant can build, drafts the questions back, returns a provisional bid/no-bid, pulls cost history, routings and closed-job actuals, adapts a prior part's model in SOLIDWORKS where connected (saved as new; building from a drawing, text or a STEP file falls back to a hand-entered feature list in this edition), derives machine hours per operation with each hour's basis labelled, and drafts the quote with its cost basis shown. Four approval gates, and the chain pauses for days while the customer answers. Use when someone says \"run the RFQ chain,\" \"take this RFQ all the way to a quote,\" \"quote this end to end,\" \"quote this from the drawing,\" or names an inquiry and asks for the full workflow."
-compatibility: "Requires none. Chains customer-inquiry-intake, data-consolidate and quote-build, and runs the design step itself. Reads Microsoft 365 and NetSuite or Infor M3 where connected, and SOLIDWORKS through the bundled bridge for the design step (path B); runs on a pasted RFQ and file exports with no connector, with every missing piece labelled. Nothing reaches a customer without the estimator releasing it. Resumable: answers arriving days later re-enter the chain rather than starting a new one."
+description: "Runs the whole RFQ-to-quote chain end to end: reads the inquiry and its drawings, checks it against what the plant can build, drafts the questions back, returns a provisional bid/no-bid, pulls cost history, routings and closed-job actuals, builds an internal estimating model in SOLIDWORKS where connected (from the drawing, a prior part's model saved as new, text specs as a ROM only, or a STEP file), derives machine hours per operation with each hour's basis labelled, and drafts the quote with its cost basis shown. Four approval gates, and the chain pauses for days while the customer answers. Use when someone says \"run the RFQ chain,\" \"take this RFQ all the way to a quote,\" \"quote this end to end,\" \"quote this from the drawing,\" or names an inquiry and asks for the full workflow."
+compatibility: "Requires none. Chains customer-inquiry-intake, data-consolidate and quote-build, and runs the design step itself. Reads Microsoft 365 and NetSuite or Infor M3 where connected, and SOLIDWORKS through the bundled bridge for the design step; runs on a pasted RFQ and file exports with no connector, with every missing piece labelled. Nothing reaches a customer without the estimator releasing it. Resumable: answers arriving days later re-enter the chain rather than starting a new one."
 ---
 
 # RFQ to Quote
@@ -34,7 +34,7 @@ check.
 → Step 6 BEFORE step 7: a current-revision routing makes the design a cross-check, not the basis
 → Step 7 builds an internal model per path: C2 drawing, B prior model saved as new, A text (ROM only), C1 STEP (unverified)
 → Integrity check before and after every CAD step. The prior model is never overwritten
-→ SOLIDWORKS missing, or a path the bridge cannot build? Hand-entered features or no design step. Labelled, never a stop
+→ SOLIDWORKS missing? Hand-entered features or no design step. Labelled, never a stop
 → Four gates: send questions, confirm bid/no-bid, confirm the design, release the quote
 ```
 
@@ -124,8 +124,7 @@ the design step on purpose:** where a current-revision routing or trustworthy
 actuals exist, the model is a cross-check, not the basis.
 
 **7. The design step.** Per line, by path, build the internal estimating model
-in a new SOLIDWORKS file where the bridge can build it — in this edition, path B
-only; C2, A and C1 take the hand-entered feature list (`../design-space-explore/reference/cad-adapter.md`, *What this version does not do*) — every feature citing its source, with the
+in a new SOLIDWORKS file, every feature citing its source, with the
 document-integrity check before and after: **C2** from the drawing; **B** by
 opening a different prior part's model, applying the drawing's changes and
 saving as a new document, the prior model never overwritten, falling back to
@@ -298,7 +297,7 @@ nothing is written to a system. Read `../../shared/command-center.md`.
 | CAM | Not connected in this edition. Feature path only, and the label says so |
 | Plant cutting data | The feature path cannot time a cut; that op is rung 4 |
 | Routings and actuals | Tabs named missing. The ladder starts at rung 3 |
-| A prior part model (path B) | **Falls back to C2**: in this edition the hand-entered feature list from the drawing, `origin: hand_entered`, not built in CAD, and says so with the reason. The prior model is never written to |
+| A prior part model (path B) | **Falls back to C2**, built from the drawing in a new document, and says so with the reason. The prior model is never written to |
 | CAD, on a STEP file with no drawing (path C1) | **"C1: STEP read without CAD (unverified)"** — the STEP read as a text file, every value cited and labelled unverified. Else a hand-entered feature list, else skip step 7, labelled |
 | A drawing (path A, text specs only) | Built from the text, every dimension `from_text`. **A ROM, never a firm quote** — budgetary on the customer document, and nothing about how it was estimated |
 | Unexpected content in the file | Step 7 fails for that line. The user is told what was found |
@@ -322,7 +321,7 @@ nothing is written to a system. Read `../../shared/command-center.md`.
 | `../customer-inquiry-intake/SKILL.md` | Steps 1 to 5 and 2-on-return |
 | `../data-consolidate/SKILL.md` | Step 6 — routings, actuals and the backflush check |
 | `reference/design-step.md` | Steps 7 and 8 — the paths, the build, the integrity check and Gate 3 |
-| `../design-space-explore/reference/cad-adapter.md` | Step 7, before the first SOLIDWORKS call — the bridge's tools, what this edition does not build, and the behaviors that break a naive script |
+| `../design-space-explore/reference/cad-adapter.md` | Step 7, before the first SOLIDWORKS call — the bridge's create-from-scratch, save-as-new and STEP import tools, what this edition does not build, and the behaviors that break a naive script |
 | `../design-space-explore/reference/adapt-prior-model.md` | Step 7, path B — open the prior model, apply, save as new, never overwrite |
 | `../quote-build/SKILL.md` | Steps 9 to 11 |
 | `../../shared/contracts/intake-form.md` | The handoff, including `geometry_path`, `bid_decision_state` and `inquiry_state` |

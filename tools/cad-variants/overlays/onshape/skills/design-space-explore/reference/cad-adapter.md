@@ -10,14 +10,14 @@ Three callers use this file:
 - **`design-space-explore`** — variants of an existing model. It reads
   parameters, applies parameter sets, reads properties and creates variant
   documents. **It never designs from scratch.**
-- **`rfq-to-quote`, step 7** — the design step. Path B adapts a prior part's
-  model with the same copy, apply and untouched-check mechanism
-  `design-space-explore` uses — `adapt-prior-model.md`. Paths C2 and A (build
-  from scratch) and C1 (STEP import) are **not implemented by the bridge in this
-  version**: they take the hand-entered feature list, as when no CAD is
-  connected. See *What this version does not do*.
+- **`rfq-to-quote`, step 7** — the design step. Path C2 (a drawing) and path A
+  (text specs) build an estimating model in a **new document** with the
+  create-from-scratch tools below. Path B adapts a prior part's model with the
+  same copy, apply and untouched-check mechanism `design-space-explore` uses —
+  `adapt-prior-model.md`. Path C1 imports a customer's STEP file into a new
+  document and reads it. All three are **unverified** on a live Onshape account.
 - **`quote-build`, the CAM path** — **not available in this edition.** Hours
-  come from the feature path.
+  come from the feature path. See *What this version does not do*.
 
 ---
 
@@ -44,7 +44,10 @@ library only: Python 3.10+ is all it needs.
 - **The bridge has not been run against a live Onshape account.** Its
   endpoints come from Onshape's API documentation
   (onshape-public.github.io/docs) and the endpoint list of Onshape's generated
-  API client; its behaviour was not checked. Every tool says so. Say so in every
+  API client; its behaviour was not checked. The documentation shows a sketch
+  with a circle, and an extrude; the line geometry, the fillet and chamfer
+  parameters, and an import that makes a Part Studio from a STEP file are built
+  from Onshape's feature schema and have no worked example to check against. Every tool says so. Say so in every
   output that came from it until a run on a real document has been recorded here.
 
 | Bridge tool | Adapter operation | Onshape endpoint |
@@ -60,6 +63,11 @@ library only: Python 3.10+ is all it needs.
 | `onshape_set_variables` | Check the whole set, apply it, undo it if a write fails, read health after | Part Studio `#variable` features (`POST .../features/featureid/{fid}`, one per variable, then `GET .../features`) or a Variable Studio (`POST /variables/d/{did}/w/{wid}/e/{eid}/variables`, one call) |
 | `onshape_create_version` | Pin a variant, in a bridge-made copy only | `POST /documents/d/{did}/versions` |
 | `onshape_check_base_untouched` | Confirm the base did not move. Refuses to answer when either microversion is missing | the base workspace's current microversion against the one recorded |
+| `onshape_create_document` | Create a new, private document for an estimating model, and register it as one the bridge writes. Checks its one Part Studio is empty | `POST /documents`; `GET /documents/d/{did}/w/{wid}/elements` |
+| `onshape_add_feature` | One sketch, extrude, cut, fillet or chamfer, checked before and after, deleted again on failure | `POST /partstudios/d/{did}/w/{wid}/e/{eid}/features` (`BTMSketch-151`, `BTMFeature-134` for `extrude`, `fillet`, `chamfer`); `DELETE .../features/featureid/{fid}`; `POST .../featurescript` to count edges and faces |
+| `onshape_import_step`, `onshape_import_status` | Import a customer's STEP file into a new document, and register it | `POST /documents`; `POST /translations/d/{did}/w/{wid}` (multipart upload); `GET /translations/{tid}` |
+| `onshape_list_contents` | The integrity check: features, sketches, bodies, external references | `GET .../features`; `GET .../bodydetails`; derived features and reference parameters in the feature list |
+| `onshape_read_faces` | Read bodies and faces of a Part Studio | `GET .../bodydetails` |
 
 **The vendor's MCP server is a different tool.** PTC's *FeatureScript MCP
 Server* (Onshape Labs, an early-access programme, announced August 2026, at
@@ -133,17 +141,47 @@ during the run**: the untouched check catches it, and the run stops.
 
 ---
 
+### Create-from-scratch operations — `rfq-to-quote` step 7, paths C2 and A
+
+Always in a **new document the step creates itself** with
+`onshape_create_document`, named for the inquiry, line and revision
+(`<inquiry>_L<line>_<part>_R<rev>`). Never in a document that holds anything
+else, and never in a customer's: the bridge refuses to build in any document it
+did not make. Report the new document's URL.
+
+| Operation | Bridge call | Notes |
+|---|---|---|
+| Create sketch | `onshape_add_feature`, kind `sketch` | On the Top, Front or Right plane; rectangles, circles and lines in millimetres, each dimension from the drawing with its view and zone. Returns the sketch's feature id |
+| Extrude | kind `extrude`, operation `NEW` or `ADD` | Stock and the main prismatic form; `BLIND` with a depth, or `THROUGH_ALL` |
+| Hole / cut | kind `extrude`, operation `REMOVE` | A through hole is a circle cut `THROUGH_ALL`; a pocket or blind bore is `BLIND`. The Hole feature is not used: a counterbore is two cuts, and a thread is recorded as a note, not modelled |
+| Fillet | kind `fillet`: one point on each edge, and the radius | Each point must lie on exactly one solid edge, checked by FeatureScript before the fillet; after it, the fillet must have made a face per edge |
+| Chamfer | kind `chamfer`: one point on each edge, and the distance | Equal offsets. A "break all edges" note is a chamfer set, cited to the note |
+| Read back | `onshape_read_properties`, `onshape_list_contents` | Bodies, volume; checked against a hand calculation from the drawing, or a tight box from `onshape_eval_featurescript` |
+
+Path A uses the same calls with dimensions read from text. Anything else —
+threads, lofts, sheet metal — is not built: hand-enter it beside the model and
+say so. Each feature costs about seven API calls; a typical estimating model
+of a dozen features costs about a hundred. Say so before building.
+
+### STEP import — `rfq-to-quote` path C1
+
+| Operation | Bridge call | Notes |
+|---|---|---|
+| Import STEP to a new document | `onshape_import_step` with the file path and the new document's name | The file has to be on the machine running the bridge; its SHA-256 is recorded. Onshape translates it; the bridge waits about two minutes, then `onshape_import_status` finishes it. An import that fails, or makes other than one new Part Studio, is not used |
+| Read bodies and faces | `onshape_read_faces`, `onshape_read_properties` | Read-only. A STEP file carries bodies, not a feature history: holes and pockets are recognised from cylindrical and planar faces, and each one is a reading to confirm at Gate 3 |
+
+**Nothing is generated on path C1** — no sketch, no extrude, no change to the
+imported bodies. Where the import fails, `rfq-to-quote` reads the STEP file as
+text without CAD, labelled unverified, or takes a hand-entered feature list.
+
+---
+
 ## What this version does not do
 
 | Caller | Upstream behaviour | In this edition |
 |---|---|---|
-| `rfq-to-quote` path C2 (build from the drawing) and path A (from text) | Builds an estimating model feature by feature | **Not implemented.** Onshape's feature API takes a full feature definition per sketch and extrude; the bridge has no create tools yet. Step 7 offers the hand-entered feature list, prefilled from the drawing as read, and says why: *"Onshape connected; the bridge does not build models from drawings yet. Hand-entered feature list."* |
-| `rfq-to-quote` path C1 (STEP import) | Imports into CAD and reads the bodies | **Not implemented.** The STEP is read as text without CAD (unverified), else a hand-entered list. If the engineer imports it into Onshape themselves, reading that Part Studio with `onshape_read_properties` is a read of a model the engineer imported, and labelled so |
-| `quote-build` CAM path | Toolpaths and machining time | **Not available.** No CAM API was found in Onshape's public API documentation. Hours come from the feature path; the internal sheet says *"feature path only: no CAM connection in this edition."* |
-
-The REST API documents what the first two need (`POST /documents`, feature
-creation on a Part Studio, `POST /translations/d/{did}/w/{wid}` for imports);
-adding them to the bridge is the next piece of work.
+| `quote-build` CAM path | Setups, operations, toolpaths, toolpath points and machining time | **Not available.** Onshape CAM Studio has no documented public API: it is not in Onshape's API documentation or API Explorer, and users on Onshape's forum are still asking for one. Hours come from the feature path; the internal sheet says *"feature path only: no CAM connection in this edition."* Toolpath verification by geometry goes with it |
+| Path C2 features beyond prismatic ones | Built if they work, said to be unverified | Not built: threads, lofts, sweeps, sheet metal. Hand-entered beside the model, and said so |
 
 ---
 
@@ -183,6 +221,15 @@ From Onshape's API documentation. **Read these before the first call.**
   driving check reads expressions in the Part Studio's feature list. A
   variable used only inside custom FeatureScript, or by another Part Studio,
   shows as not driving this one. Say so when a variable shows no references.
+  The same holds for external references: `onshape_list_contents` finds derived
+  features and reference parameters in the feature list, and says what it
+  scanned.
+- **Build coordinates are in millimetres; reads are in metres.**
+  `onshape_add_feature` takes millimetres, as a drawing gives them; sketch
+  geometry goes to Onshape in metres and depths as expressions with units.
+- **Edges are named by a point on them.** A fillet or chamfer takes one point on
+  each edge, in Part Studio coordinates (millimetres). Pick the point mid-edge,
+  away from corners: a point at a corner touches two edges and is refused.
 
 ---
 
@@ -191,9 +238,10 @@ From Onshape's API documentation. **Read these before the first call.**
 These hold whatever order the calls come in, because the bridge enforces them
 itself rather than relying on the steps being followed:
 
-- **It writes only to a copy it made.** `onshape_set_variables` and
-  `onshape_create_version` refuse every document that `onshape_copy_workspace`
-  did not create, and every workspace in it but the one the copy made,
+- **It writes only to a document it made.** `onshape_set_variables`,
+  `onshape_add_feature` and `onshape_create_version` refuse every document that
+  `onshape_copy_workspace`, `onshape_create_document` or `onshape_import_step`
+  did not create, and every workspace in it but the one the bridge made,
   including a base that was never protected. Making a copy protects the source
   first if it is not protected yet. A copy of a copy is refused.
 - **It checks every assignment before writing any.** If a write still fails
@@ -213,26 +261,31 @@ itself rather than relying on the steps being followed:
   bridge writes nothing until a person checks it and fixes or removes it
   (`~/.manufacturing-onshape/protected.json` unless `ONSHAPE_BRIDGE_STATE`
   says otherwise).
-- **It cannot list bodies or external references yet.** It lists features
-  (sketches are features of type `newSketch`). So the integrity check compares
-  feature lists and is recorded as `not_checked`, never `clean`, and
-  `external_references_present` is `unknown`, never `false`.
+- **Each build step is checked and undone on failure.** `onshape_add_feature`
+  checks the whole step before writing. Afterwards the feature must report `OK`,
+  `INFO` or `WARNING`, the Part Studio must regenerate, a fillet or chamfer must
+  have made a face per edge, and the feature list must be the old one plus
+  exactly this feature. Otherwise it deletes the feature again and says so; if
+  the delete fails, or features appear that this step did not make, it stops
+  writing to that document for good.
 
 ## Document integrity — before and after every design step
 
-1. **Before**, read-only: the copy's document name is the one expected, and
-   its feature list (`onshape_read_parameters`, `features`) matches the base's,
-   feature for feature.
-2. Run the step.
-3. **After**, read-only: the copy's feature list is the base's plus only what
-   this step changed; `onshape_check_base_untouched` on the base.
-4. **Anything else fails the step.** Record the result in the geometry
-   estimate's `document_integrity`, or the variant's `status_detail`, with both
-   lists.
+1. **Before**, read-only: the document's name is the one expected, and
+   `onshape_list_contents` on the Part Studio. A new document lists no feature
+   and no body; a copy lists the base's features, feature for feature.
+2. Run the step. `onshape_add_feature` runs this check itself for each feature
+   and returns it as `document_integrity`.
+3. **After**, read-only: `onshape_list_contents` again. The features are the
+   ones before plus only what this step created, by feature id;
+   `onshape_check_base_untouched` on any base.
+4. **Anything else is unexpected content and the step fails.** Record the
+   result in the geometry estimate's `document_integrity`, or the variant's
+   `status_detail`, with both lists.
 
-**Matching feature lists are recorded as `not_checked`, not `clean`**, with the
-reason: the bridge cannot list bodies or external references yet. "Not
-checked" is a result, and it is reported as one.
+The result is `clean` only when both reads returned features and bodies and
+they match. If Onshape returned no body list, it is `not_checked`, with the
+reason. "Not checked" is a result, and it is reported as one.
 
 ---
 

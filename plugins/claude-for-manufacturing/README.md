@@ -99,11 +99,13 @@ same; only the CAD connection differs. Install the one your shop runs.
 | **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |
 | **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |
 
-The SOLIDWORKS and Onshape editions vary existing models (`design-space-explore`,
-and adapting a prior part in `rfq-to-quote`). They do not yet build a model
-from a drawing, import a STEP file or derive CAM hours: those steps fall back to
-the hand-entered feature list and the feature path, and say so. Neither bridge
-has been run against a live SOLIDWORKS session or Onshape account yet. Both
+All three editions do the same CAD work: they vary existing models
+(`design-space-explore`), and in `rfq-to-quote` they build an estimating model
+from a drawing or text, adapt a prior part's model, and import a STEP file. The
+SOLIDWORKS and Onshape editions do not derive CAM hours, because neither
+SOLIDWORKS CAM nor Onshape CAM Studio publishes an API: hours come from the
+feature path, and the quote says so. Neither bridge has been run against a live
+SOLIDWORKS session or Onshape account yet. Both
 editions are generated from `claude-for-manufacturing` by `tools/cad-variants/build.py`
 at the root of this repository.
 

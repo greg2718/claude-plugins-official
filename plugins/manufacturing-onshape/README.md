@@ -99,11 +99,13 @@ same; only the CAD connection differs. This is the Onshape edition.
 | **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |
 | **Onshape** | This plugin, [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |
 
-The SOLIDWORKS and Onshape editions vary existing models (`design-space-explore`,
-and adapting a prior part in `rfq-to-quote`). They do not yet build a model
-from a drawing, import a STEP file or derive CAM hours: those steps fall back to
-the hand-entered feature list and the feature path, and say so. Neither bridge
-has been run against a live SOLIDWORKS session or Onshape account yet. Both
+All three editions do the same CAD work: they vary existing models
+(`design-space-explore`), and in `rfq-to-quote` they build an estimating model
+from a drawing or text, adapt a prior part's model, and import a STEP file. The
+SOLIDWORKS and Onshape editions do not derive CAM hours, because neither
+SOLIDWORKS CAM nor Onshape CAM Studio publishes an API: hours come from the
+feature path, and the quote says so. Neither bridge has been run against a live
+SOLIDWORKS session or Onshape account yet. Both
 editions are generated from `claude-for-manufacturing` by `tools/cad-variants/build.py`
 at the root of this repository.
 
@@ -139,7 +141,7 @@ specification for your IT.
 
 | | |
 |---|---|
-| Version | 1.0.0 (upstream), onshape edition 2 |
+| Version | 1.0.0 (upstream), onshape edition 3 |
 | Skills | 17 — 12 atomic, 5 chains |
 | Contracts | 11 — handoffs between skills, and the records the dashboards and the plant setup keep |
 | Connectors | 1 declared in `.mcp.json` — Onshape, through the bundled bridge. Also works with Microsoft 365, Oracle NetSuite and Infor M3 once you connect them in Claude |
@@ -185,18 +187,17 @@ date against real shop load before committing to one, and when a customer
 counters it revises the quote in place with a record of what moved and why —
 rather than leaving four versions in circulation.
 
-**When the RFQ is a drawing**, the chain reads the drawing's dimensions,
-tolerances and notes into a feature list (this edition's Onshape bridge does not
-build new models yet), shows you the tolerance reading and the operation list
-for a yes, then derives setup hours and cycle time per operation from the
-features (this edition has no CAM connection). Every operation on the internal sheet names
+**When the RFQ is a drawing**, the chain builds the part in Onshape from the
+drawing's dimensions, tolerances and notes, shows you the model, the tolerance
+reading and the operation list for a yes, then derives setup hours and cycle
+time per operation from the features (this edition has no CAM connection). Every operation on the internal sheet names
 where its hours came from (a current routing, closed-job actuals, the design,
 or first principles), the spread, and how far two sources disagree. Actuals
 that look like backflushed standards are flagged and never outrank the design.
 Hours, ranges and basis labels never reach the customer's quote. Without
 Onshape it still runs, a rung down the ladder, and says so. A part close to one
 you already make starts from that part's model in Onshape, saved as a new document so the
-original is never touched; a 3D STEP file is read as text, unverified, rather than rebuilt; and
+original is never touched; a 3D STEP file is imported into a new document and read rather than rebuilt; and
 written specs with no drawing give a budgetary estimate, never a firm quote.
 
 **We found bad parts**

@@ -5,10 +5,10 @@ Copyright Anthropic, licensed under the Apache License, Version 2.0 (see LICENSE
 Changes from the upstream plugin:
 - Autodesk Fusion, the upstream plugin's one CAD connector, is replaced by a different
   CAD system (SOLIDWORKS or Onshape, per edition) through a bridge in servers/.
-- Text in the skills that named Fusion is changed to the edition's CAD system, and
-  steps the bridge cannot do yet (building models from drawings, STEP import, CAM)
-  are marked as not available, with the hand-entered fallback the upstream plugin
-  already defines.
+- Text in the skills that named Fusion is changed to the edition's CAD system. The
+  bridge builds estimating models, imports STEP files and varies existing models;
+  CAM, which the edition's CAD system offers no published API for, is marked as not
+  available, with the feature-path fallback the upstream plugin already defines.
 - The changes are made by tools/cad-variants/build.py in the fork that carries this folder.
 
 This edition is not published, endorsed or maintained by Anthropic, Dassault Systèmes or PTC.

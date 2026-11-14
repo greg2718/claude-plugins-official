@@ -99,10 +99,16 @@ ONSHAPE = Edition(
 EDITIONS = {e.key: e for e in (SOLIDWORKS, ONSHAPE)}
 
 
-def not_built(e: Edition) -> str:
-    return (
-        f"{e.name} connected; the bridge does not build models from drawings yet. Hand-entered feature list."
-    )
+def tool(e: Edition, name: str) -> str:
+    """The bridge's tool for an operation, in this edition's naming."""
+    names = {
+        "solidworks": {"new": "sw_new_part", "add": "sw_add_feature", "import": "sw_import_step",
+                       "list": "sw_list_contents", "faces": "sw_read_faces", "read": "sw_read_parameters"},
+        "onshape": {"new": "onshape_create_document", "add": "onshape_add_feature",
+                    "import": "onshape_import_step", "list": "onshape_list_contents",
+                    "faces": "onshape_read_faces", "read": "onshape_read_parameters"},
+    }
+    return names[e.key][name]
 
 
 SW_SETUP_ROW = (
@@ -143,22 +149,22 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
         ("| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector (Fusion) |",
          f"| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector ({N}) |\n"
          f"| `servers/` | The {N} bridge: a standard-library MCP server the plugin starts itself |"),
-        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + " edition 2 |"),
+        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + " edition 3 |"),
         ("| Connectors | 1 declared in `.mcp.json` — Autodesk Fusion.", f"| Connectors | 1 declared in `.mcp.json` — {N}, through the bundled bridge."),
         ("To run it from a local checkout: `claude --plugin-dir .`, then say \"set us up\".",
          "To run it from a local checkout: `claude --plugin-dir .` in this folder, then say \"set us up\"."),
         ("**When the RFQ is a drawing**, the chain builds the part in Fusion from the\ndrawing's dimensions, tolerances and notes, shows you the model, the tolerance\nreading and the operation list for a yes, then derives setup hours and cycle\ntime per operation — from the CAM toolpath where your cutting data is on file,\nand from the features otherwise.",
-         f"**When the RFQ is a drawing**, the chain reads the drawing's dimensions,\ntolerances and notes into a feature list (this edition's {N} bridge does not\nbuild new models yet), shows you the tolerance reading and the operation list\nfor a yes, then derives setup hours and cycle time per operation from the\nfeatures (this edition has no CAM connection)."),
+         f"**When the RFQ is a drawing**, the chain builds the part in {N} from the\ndrawing's dimensions, tolerances and notes, shows you the model, the tolerance\nreading and the operation list for a yes, then derives setup hours and cycle\ntime per operation from the features (this edition has no CAM connection)."),
         ("Without\nFusion it still runs, a rung down the ladder, and says so. A part close to one\nyou already make starts from that part's model, saved as a new document so the\noriginal is never touched; a 3D STEP file is read rather than rebuilt;",
-         f"Without\n{N} it still runs, a rung down the ladder, and says so. A part close to one\nyou already make starts from that part's model in {N}, saved as a new {e.doc} so the\noriginal is never touched; a 3D STEP file is read as text, unverified, rather than rebuilt;"),
+         f"Without\n{N} it still runs, a rung down the ladder, and says so. A part close to one\nyou already make starts from that part's model in {N}, saved as a new {e.doc} so the\noriginal is never touched; a 3D STEP file is imported into a new {e.doc} and read rather than rebuilt;"),
         ("`design-space-explore` generates a batch of CAD variants directly in Fusion\nby applying changed parameters to the model you already have\nopen",
          f"`design-space-explore` generates a batch of CAD variants in {N}\nby applying changed parameters to the model you already have\n{'open' if k == 'solidworks' else 'in Onshape'}"),
         ("| RFQ to quote | customer-inquiry-intake → data-consolidate → design step in Fusion → quote-build, four gates |",
          f"| RFQ to quote | customer-inquiry-intake → data-consolidate → design step in {N} → quote-build, four gates |"),
         ("Oracle NetSuite or Infor M3 for the ERP records; Autodesk\nFusion for CAD and CAM, or SOLIDWORKS or Onshape for CAD in their\n[editions](#cad-editions).",
          f"Oracle NetSuite or Infor M3 for the ERP records; {N}\nfor CAD."),
-        ("The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. Install the one your shop runs.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | This plugin, `claude-for-manufacturing` | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nThe SOLIDWORKS and Onshape editions vary",
-         f"The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. This is the {N} edition.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | [`claude-for-manufacturing`](../claude-for-manufacturing), Anthropic's original | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | {'This plugin, ' if k == 'solidworks' else ''}[`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | {'This plugin, ' if k == 'onshape' else ''}[`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nThe SOLIDWORKS and Onshape editions vary"),
+        ("The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. Install the one your shop runs.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | This plugin, `claude-for-manufacturing` | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nAll three editions do the same CAD work",
+         f"The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. This is the {N} edition.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | [`claude-for-manufacturing`](../claude-for-manufacturing), Anthropic's original | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | {'This plugin, ' if k == 'solidworks' else ''}[`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | {'This plugin, ' if k == 'onshape' else ''}[`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nAll three editions do the same CAD work"),
         ("(`shared/erp-connectors.md`). Fusion is declared in `.mcp.json` at a local address,\nbecause its MCP server runs inside the desktop app on your machine rather than\nin the cloud.",
          f"(`shared/erp-connectors.md`). {declared}"),
     ]
@@ -166,7 +172,6 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
 
 def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
     N, k = e.name, e.key
-    adapter_note = "`../design-space-explore/reference/cad-adapter.md`, *What this version does not do*"
     return {
         # ------------------------------------------------------------------ design-space-explore
         "skills/design-space-explore/SKILL.md": [
@@ -212,15 +217,15 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
         # ------------------------------------------------------------------ rfq-to-quote
         "skills/rfq-to-quote/SKILL.md": [
             ("builds an internal estimating model in Fusion where connected (from the drawing, a prior part's model saved as new, text specs as a ROM only, or a STEP file),",
-             f"adapts a prior part's model in {N} where connected (saved as new; building from a drawing, text or a STEP file falls back to a hand-entered feature list in this edition),"),
+             f"builds an internal estimating model in {N} where connected (from the drawing, a prior part's model saved as new, text specs as a ROM only, or a STEP file),"),
             ("and Autodesk Fusion (desktop, open) for the design step and CAM hours;",
-             f"and {N} through the bundled bridge for the design step (path B);"),
+             f"and {N} through the bundled bridge for the design step;"),
             ("→ Fusion missing? Hand-entered features or no design step. Labelled, never a stop",
-             f"→ {N} missing, or a path the bridge cannot build? Hand-entered features or no design step. Labelled, never a stop"),
+             f"→ {N} missing? Hand-entered features or no design step. Labelled, never a stop"),
             ("| Fusion, for the design step | The desktop app, with the connector | Live CAD connection |",
              f"| {N}, for the design step | The bundled bridge | Live CAD connection |"),
             ("in a new Fusion document, every feature citing its source, with the",
-             f"in a new {N} {e.doc} where the bridge can build it — in this edition, path B\nonly; C2, A and C1 take the hand-entered feature list ({adapter_note}) — every feature citing its source, with the"),
+             f"in a new {N} {e.doc}, every feature citing its source, with the"),
             ("the CAM path where Fusion\nManufacturing and plant cutting data exist, the feature path always",
              "the feature path (this edition has no CAM\nconnection)"),
             ("- **Foreign geometry appears in the Fusion document** — the step fails. Ask\n  the user to restart Fusion. Never build on top of it.",
@@ -234,11 +239,11 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
             ("| Foreign geometry in the document | Step 7 fails for that line. The user restarts Fusion |",
              f"| Unexpected content in the {e.doc} | Step 7 fails for that line. The user is told what was found |"),
             ("| `../design-space-explore/reference/cad-adapter.md` | Step 7, before the first Fusion call — the create-from-scratch, save-as-new and STEP import calls, and the connector behaviors that break them |",
-             f"| `../design-space-explore/reference/cad-adapter.md` | Step 7, before the first {N} call — the bridge's tools, what this edition does not build, and the behaviors that break a naive script |"),
+             f"| `../design-space-explore/reference/cad-adapter.md` | Step 7, before the first {N} call — the bridge's create-from-scratch, save-as-new and STEP import tools, what this edition does not build, and the behaviors that break a naive script |"),
         ],
         "skills/rfq-to-quote/reference/design-step.md": [
             ("Read `../../design-space-explore/reference/cad-adapter.md` first: the\ncreate-from-scratch calls, and the connector behaviors that lose calls or plant\nforeign geometry. The rules that matter most:\n\n- Every script defines `run(context)` and prints what it needs back.\n- Inspection calls are `readOnly: true`.\n- Each call under about 25 seconds.\n- Design workspace active on every call.\n- Fusion open with the document active; there is no file-only path.\n\nThen:",
-             f"**In this edition the {N} bridge does not build models from drawings**\n(`../../design-space-explore/reference/cad-adapter.md`, *What this version does\nnot do*). Path C2 runs as *When {N} is not there* below — the hand-entered\nfeature list, prefilled from the drawing — and says so in one line on the\ninternal sheet: *\"{not_built(e)}\"* The steps below are what that list, and a\nfuture build, must carry, and stay the rules for Gate 3:"),
+             f"Read `../../design-space-explore/reference/cad-adapter.md` first: the bridge's\ncreate-from-scratch tools, and the behaviors that break a naive build. The\nrules that matter most:\n\n- {N} connected: {e.connect.replace(', and the URL of the base Part Studio', '').replace(' with the model open and active', '')}.\n- The bridge builds only in a {e.doc} it made (`{tool(e, 'new')}`).\n- One feature per `{tool(e, 'add')}` call; it checks the feature and undoes it\n  if the check fails.\n- Dimensions in millimetres. Fillet and chamfer edges are named by a point\n  mid-edge.\n- Sketch, extrude, cut, fillet and chamfer only. A thread, loft or sheet-metal\n  feature is hand-entered beside the model, and said so.\n- **Building through the {N} bridge is unverified**: it has not been run\n  against a live {N} {'session' if k == 'solidworks' else 'account'}. Say so at Gate 3.\n\nThen:"),
             ("document lists none. Anything there means the add-in is replaying an earlier\n   script: stop and ask the user to restart Fusion.",
              f"{e.doc} lists none. Anything there: stop, and tell the user what was found."),
             ("   this line. Record both lists. Tell the user to restart Fusion.",
@@ -246,15 +251,15 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
             ("1. **The user opens the prior model in Fusion.** Read it, read-only: name,\n   reference, version, parameters, bodies, sketches, unsaved changes.",
              f"1. **{e.open_prior}** Read it, read-only: name,\n   reference, {e.version_word}, parameters, features, unsaved changes. Protect it."),
             ("Without Fusion: the hand-entered feature list, prefilled from the text, every\nrow `from_text`, `origin: hand_entered`. Still a ROM.",
-             f"In this edition, and without {N}: the hand-entered feature list, prefilled\nfrom the text, every row `from_text`, `origin: hand_entered`. Still a ROM."),
+             f"Without {N}: the hand-entered feature list, prefilled from the text, every\nrow `from_text`, `origin: hand_entered`. Still a ROM."),
             ("**STEP import through the connector is unverified.** It has never been run in\nthis repo. Say so on the line, every time.\n\nWith Fusion: import the STEP into a new document named like any estimating\nmodel, integrity check before and after, then read bodies, bounding box,\nvolume and faces read-only.",
-             f"**The {N} bridge does not import STEP files in this edition.** Go straight\nto the steps under *When the import fails or {N} is not connected*. Where the\nengineer imports the STEP into {N} themselves and gives you the result, read\nit read-only and label it as a model the engineer imported, then read bodies,\nbounding box (approximate), volume and faces read-only."),
+             f"**STEP import through the {N} bridge is unverified.** It has not been run\nagainst a live {N} {'session' if k == 'solidworks' else 'account'}. Say so on the line, every time.\n\nWith {N}: import the STEP with `{tool(e, 'import')}` into a new {e.doc} named\nlike any estimating model, integrity check before and after (`{tool(e, 'list')}`),\nthen read bodies, bounding box, volume and faces read-only (`{tool(e, 'faces')}`)."),
             ("`origin: customer_step`, `cad_backend: fusion`.",
              f"`origin: customer_step`, `cad_backend: {k}`."),
             ("**When the import fails or Fusion is not connected**, in this order:",
              f"**When the import fails or {N} is not connected**, in this order:"),
             ("## When Fusion is not there\n\nThe chain completes; step 7 changes shape, and says so in one line on the\ninternal sheet: *\"Fusion not connected — no model built.\"*",
-             f"## When {N} is not there\n\nThe chain completes; step 7 changes shape, and says so in one line on the\ninternal sheet: *\"{N} not connected — no model built.\"* — or, where {N} is\nconnected but the path is one this edition cannot build, *\"{not_built(e)}\"*"),
+             f"## When {N} is not there\n\nThe chain completes; step 7 changes shape, and says so in one line on the\ninternal sheet: *\"{N} not connected — no model built.\"*"),
             ("Either way the chain does not stop at step 7 for want of Fusion.",
              f"Either way the chain does not stop at step 7 for want of {N}."),
         ],
@@ -296,7 +301,7 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
              f"A write that lands in the wrong {e.doc} is the failure that costs most. So"),
             ("| Names as Fusion listed them |", f"| Names as {N} listed them (features and bodies) |"),
             ("PN-4471-B Rev 2, path C2, built in Fusion from the drawing.",
-             f"PN-4471-B Rev 2, path C2, built in CAD from the drawing (an example from the upstream edition; this {N} edition hand-enters C2 lines)."),
+             f"PN-4471-B Rev 2, path C2, built in {N} from the drawing."),
             ('  document_ref: "fusion://Fairview/estimates/EH-RFQ-0912_L1_PN-4471-B_R2"', f'  document_ref: "{e.example_estimate_ref}"'),
             ("  cad_backend: fusion", f"  cad_backend: {k}"),
             ('  base_model_ref: "fusion://Fairview/parts/PN-4402-A v7 (version read again after the run: v7)"', f'  base_model_ref: "{e.example_prior_ref}"'),
@@ -378,70 +383,51 @@ def safety_edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
     """Edits from the Nov 14 review: say what the bridges can and cannot check, and label a
     failed adaptation as what it is. Applied after `edits`, to the text those edits produced."""
     N, k = e.name, e.key
-    read_tool = "sw_read_parameters" if k == "solidworks" else "onshape_read_parameters"
-    copy_tool = "sw_save_copy_and_open" if k == "solidworks" else "onshape_copy_workspace"
-    fallback = (
-        f"**When path B does not fit, the line falls back to C2**, which in this edition\n"
-        f"is the hand-entered feature list, prefilled from the drawing as read (the {N}\n"
-        f"bridge does not build models from drawings yet; `cad-adapter.md`, *What this\n"
-        f"version does not do*). Say it in one line — *\"Path B: <prior model> <reason>;\n"
-        f"hand-entered feature list from the drawing (C2), not built in CAD.\"* Never say\n"
-        f"the line was built from the drawing: nothing was built. The reasons:"
-    )
-    emitted = (
-        "The geometry estimate is then emitted as `geometry_path: C2`, `origin:\n"
-        "hand_entered`, `cad_backend: none`, `document_ref: null`, `base_model_ref: null`,\n"
-        "every row unconfirmed until the estimator confirms it at Gate 3, with the\n"
-        "fallback and its reason as the first entry in `questions_for_estimator` so it is\n"
-        "seen at Gate 3."
-    )
+    list_tool = tool(e, "list")
     integrity_before = (
-        f"Read the new {e.doc}'s feature list (`{read_tool}`), read-only. **It must match\n"
-        f"the prior model's list from step 1, feature for feature.** Anything else is\n"
-        f"unexpected content: the copy is not the one expected, or something else wrote\n"
-        f"to it. Stop, and tell the user what was found.\n\n"
-        f"**The bridge cannot list bodies or external references yet.** So this check is\n"
-        f"never recorded as `clean`: record `document_integrity.result: not_checked`,\n"
-        f"with both feature lists, and `detail` saying the feature lists matched but\n"
-        f"bodies and external references could not be read by the {N} bridge."
+        f"List features, sketches and bodies in the new {e.doc} (`{list_tool}`), read-only.\n"
+        f"**They must match the prior model's list from step 1, name for name.** A new\n"
+        f"{e.doc} that is a copy is not empty, so \"a fresh {e.doc} lists none\" does not\n"
+        f"apply here; \"it lists exactly what the prior model held\" does. Anything else\n"
+        f"is unexpected content: the copy is not the one expected, or something else\n"
+        f"wrote to it. Stop, and tell the user what was found.\n\n"
+        f"Record `document_integrity.result: clean` only when both reads returned the\n"
+        f"bodies as well as the features and they match. Where {N} returned no body\n"
+        f"list, the result is `not_checked`, with the reason."
     )
     return {
         "skills/design-space-explore/reference/adapt-prior-model.md": [
             ("- its bodies and sketches, by name",
-             f"- its feature list, by name and type (`{read_tool}`; sketches are features).\n"
-             "  Its bodies cannot be listed through the bridge yet: record them as unknown"),
+             f"- its features, sketches and bodies, by name (`{list_tool}`), and whether it\n"
+             "  has external references"),
             ("List bodies and sketches in the new document, read-only. **They must match the\nprior model's list from step 1, name for name.** A new document that is a copy\nis not empty, so \"a fresh document lists none\" does not apply here; \"it lists\nexactly what the prior model held\" does. Anything else is foreign geometry: the\ncopy is not the one expected, or something else wrote to it. Stop, and\ntell the user what was found.",
              integrity_before),
             ("Same bodies and sketches by name, plus only what this step created. Anything\nelse is foreign geometry and the step fails, with both lists recorded.",
-             f"The same feature list, read again with `{read_tool}`, plus only what this step\n"
-             "created. Anything else is unexpected content and the step fails, with both\n"
-             "lists recorded. As at step 3, the result is `not_checked`, never `clean`,\n"
-             "because bodies and external references are not read."),
+             f"Same features, sketches and bodies by name (`{list_tool}`), plus only what this\n"
+             "step created. Anything else is unexpected content and the step fails, with\n"
+             "both lists recorded. As at step 3, the result is `clean` only when both reads\n"
+             "returned bodies."),
             ("Apply each changed parameter. After the set, confirm the model regenerated\nwith no failed feature.",
              "Apply the whole parameter set in one call: the bridge checks every change\n"
              "before it writes any, and undoes the set if one fails part way. Then confirm\n"
              "the model regenerated with no failed feature. **Only `regenerated: true` is a\n"
              "pass**: false is a failure, and a missing or unknown health is treated as one."),
             ("the regeneration result, both\nintegrity lists, and the untouched check.",
-             "the regeneration result, both\nintegrity lists, the integrity result (`not_checked`, with the reason),\n"
+             "the regeneration result, both\nintegrity lists, the integrity result (`clean`, or `not_checked` with the reason),\n"
              "and the untouched check."),
-            ("**When path B does not fit, the line falls back to C2**: built from the drawing\nin a fresh new document, and said in one line — *\"Path B: <prior model>\n<reason>; built from the drawing as C2.\"* The reasons:",
-             fallback),
-            ("The geometry estimate is then emitted as `geometry_path: C2`, `origin:\nbuilt_from_drawing`, `base_model_ref: null`, with the fallback and its reason\nas the first entry in `questions_for_estimator` so it is seen at Gate 3.",
-             emitted),
         ],
         "skills/design-space-explore/reference/parametric-check.md": [
             ("  decide whether to proceed with that risk understood rather than discover\n  a broken assembly reference after the batch runs.",
              "  decide whether to proceed with that risk understood rather than discover\n  a broken assembly reference after the batch runs.\n"
-             f"  **The {N} bridge cannot read external references yet.** Record\n"
-             "  `external_references_present: unknown`, never `false`, and tell the\n"
-             "  engineer before generating that they were not checked, so they can say\n"
-             "  whether the model has any."),
+             f"  The {N} bridge reads them with `{list_tool}` (unverified), and says what it\n"
+             "  scanned. Record `true` or `false` as it returns them; where it cannot\n"
+             "  tell, record `external_references_present: unknown`, never `false`, and\n"
+             "  tell the engineer before generating that they were not checked."),
         ],
         "skills/design-space-explore/SKILL.md": [
             ("- **The model has external references or in-context relationships** —\n  variant generation can break them. Detect and warn before generating.",
-             "- **The model has external references or in-context relationships** —\n  variant generation can break them. This edition's bridge cannot detect\n"
-             "  them yet: say they were not checked, and ask, before generating."),
+             "- **The model has external references or in-context relationships** —\n  variant generation can break them. Detect them with `"
+             + list_tool + "` and warn\n  before generating. Where the bridge cannot tell, say they were not checked,\n  and ask."),
         ],
         "skills/design-space-explore/reference/variant-generation.md": [
             ("**Generation is idempotent.** Before creating a variant, look for an existing\ndocument with the same name and the same parameter values: after a partial\nbatch, a re-run, or a call that executed twice. If one exists, reuse it and\nrecord it in the manifest as `reused_existing` with its reference; never create\na second copy.",
@@ -455,32 +441,11 @@ def safety_edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
              "new copies"
              + (" (the bridge already refuses a file name that exists)." if k == "solidworks" else ".")),
         ],
-        "skills/rfq-to-quote/SKILL.md": [
-            ("| A prior part model (path B) | **Falls back to C2**, built from the drawing in a new document, and says so with the reason. The prior model is never written to |",
-             f"| A prior part model (path B) | **Falls back to C2**: in this edition the hand-entered feature list from the drawing, `origin: hand_entered`, not built in CAD, and says so with the reason. The prior model is never written to |"),
-        ],
-        "skills/rfq-to-quote/reference/design-step.md": [
-            ("**Name the path that actually ran.** A path B line built from the drawing\nbecause the prior model was not there",
-             "**Name the path that actually ran.** A path B line that fell back\nbecause the prior model was not there"),
-            ("match the drawing. Say it in one line, in these words, naming both paths so\nthe estimator sees which one ran: *\"Path B: PN-4402-A model not on file; built\nfrom the drawing as C2.\"* Emit the estimate as `geometry_path: C2`,\n`origin: built_from_drawing`, `base_model_ref: null`, with the fallback and its\nreason as the first entry in `questions_for_estimator`.",
-             "match the drawing. Say it in one line, in these words, naming both paths so\n"
-             "the estimator sees which one ran: *\"Path B: PN-4402-A model not on file;\n"
-             "hand-entered feature list from the drawing (C2), not built in CAD.\"* In this\n"
-             f"edition the {N} bridge does not build from drawings, so emit the estimate as\n"
-             "`geometry_path: C2`, `origin: hand_entered`, `cad_backend: none`,\n"
-             "`base_model_ref: null`, with the fallback and its reason as the first entry in\n"
-             "`questions_for_estimator`."),
-        ],
-        "shared/contracts/geometry-estimate.md": [
-            ("a path B line that fell back is `C2` and `built_from_drawing` |",
-             f"a path B line that fell back is `C2` and, in this {N} edition, `hand_entered`, because the bridge does not build from drawings |"),
-        ],
         "shared/contracts/variant-manifest.md": [
             ("  external_references_present: true\n```",
              "  external_references_present: true\n```\n\n"
              f"`external_references_present` is `true`, `false` or `unknown`. The {N} bridge\n"
-             "cannot read external references yet, so a manifest from this edition says\n"
-             "`unknown` unless the engineer has told you which it is."),
+             f"reads it with `{list_tool}`; `unknown` where it could not tell, never `false`."),
         ],
     }
 

@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """SOLIDWORKS bridge: the CAD adapter surface of manufacturing-solidworks, over MCP stdio.
 
-Implements the variant operations `skills/design-space-explore/reference/cad-adapter.md`
-lists, against the SOLIDWORKS API through COM. It attaches to the SOLIDWORKS
-session already running on this Windows machine and acts on the document open
-in it; it never starts SOLIDWORKS and never opens the base model itself.
+Implements the operations `skills/design-space-explore/reference/cad-adapter.md`
+lists (variants, open-apply-save-as-new, building a part from a drawing, STEP
+import, and the integrity check), against the SOLIDWORKS API through COM. It
+attaches to the SOLIDWORKS session already running on this Windows machine; it
+never starts SOLIDWORKS and never opens the base model itself. It writes only to
+files it made: copies, new parts and imported parts. CAM is not implemented.
 
 Needs: Windows, SOLIDWORKS running, Python 3.10+, and pywin32 (`pip install pywin32`).
 
     SOLIDWORKS_BRIDGE_STATE   file that remembers protected base files
                               default %USERPROFILE%\\.manufacturing-solidworks\\protected.json
+    SOLIDWORKS_PART_TEMPLATE  optional .prtdot for sw_new_part (default: SOLIDWORKS's default part template)
 
 Status: written against the SOLIDWORKS API Help (method names, signatures and
-enum values checked). NOT yet run against a live SOLIDWORKS session. Every tool
+enum values checked; the feature-building calls against a markdown mirror of it). NOT yet run against a live SOLIDWORKS session. Every tool
 says so in its description until it has been.
 """
 
@@ -30,7 +33,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp_stdio import Server, ToolError, log  # noqa: E402
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 UNVERIFIED = " (Not yet run against a live SOLIDWORKS session.)"
 
 # Enum values, from the SOLIDWORKS API Help's swconst pages.
@@ -45,6 +48,24 @@ SET_VALUE_STATUS = {0: "Successful", 1: "Failure", 2: "InvalidValue", 3: "Driven
 DOC_TYPES = {SW_DOC_PART: "part", SW_DOC_ASSEMBLY: "assembly", SW_DOC_DRAWING: "drawing"}
 
 QUOTED = re.compile(r'"([^"]+)"')
+
+# Feature-building enum values, from a markdown mirror of the SOLIDWORKS API Help's swconst pages.
+SW_END_BLIND, SW_END_THROUGH_ALL = 0, 1                                  # swEndConditions_e
+SW_START_SKETCH_PLANE = 0                                                # swStartConditions_e
+SW_SOLID_BODY = 0                                                        # swBodyType_e
+SW_FILLET_UNIFORM_RADIUS = 2                                             # swFeatureFilletOptions_e
+SW_FILLET_TYPE_SIMPLE = 0                                                # swFeatureFilletType_e
+SW_FILLET_OVERFLOW_DEFAULT = 0                                           # swFilletOverFlowType_e
+SW_CHAMFER_EQUAL_DISTANCE = 16                                           # swChamferType_e
+# swUserPreferenceStringValue_e.swDefaultTemplatePart: the mirror lists the member without its number.
+# 8 is the value SOLIDWORKS macros use; the template path read with it is checked before use, and
+# SOLIDWORKS_PART_TEMPLATE overrides it.
+SW_DEFAULT_TEMPLATE_PART = 8
+EDGE_TOLERANCE_M = 1e-6
+MAX_IMPORT_BYTES = 200 * 1024 * 1024
+PLANES = ("Front", "Top", "Right")
+EXTRUDE_OPERATIONS = ("NEW", "ADD", "REMOVE")
+END_BOUNDS = ("BLIND", "THROUGH_ALL")
 
 
 # ---------------------------------------------------------------------------
@@ -114,11 +135,106 @@ def global_variable_drivers(equations: List[Dict[str, Any]]) -> Dict[str, Dict[s
 
 STATE_FORMAT = 2
 INTEGRITY_NOTE = (
-    "The feature list is read from the FeatureManager tree (sketches are the features of type ProfileFeature). "
-    "The bridge cannot list bodies or external references (in-context or derived references) yet: record the "
-    "integrity check as not_checked, with the feature lists, and external references as unknown. Never record "
-    "them as clean or absent."
+    "Use sw_list_contents before and after a step for the integrity check: it lists the FeatureManager tree "
+    "(sketches are the features of type ProfileFeature), solid bodies, and the count of external references "
+    "SOLIDWORKS reports. Record the check as clean only when both reads succeeded and the after-list holds "
+    "exactly the before-list plus what the step made."
 )
+
+
+def _finite(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf")):
+        raise ToolError(f"{label} must be a finite number in millimetres, not {value!r}. Nothing was changed.")
+    return float(value)
+
+
+def _positive(value: Any, label: str) -> float:
+    number = _finite(value, label)
+    if number <= 0:
+        raise ToolError(f"{label} must be greater than zero, not {value!r}. Nothing was changed.")
+    return number
+
+
+def feature_spec(kind: str, spec: Any) -> Dict[str, Any]:
+    """Check a build step completely and convert it to SI units (metres) before anything is changed."""
+    if not isinstance(spec, dict):
+        raise ToolError("spec must be an object. Nothing was changed.")
+    mm = 0.001
+    if kind == "sketch":
+        plane = spec.get("plane")
+        if plane not in PLANES:
+            raise ToolError(f"plane must be one of {', '.join(PLANES)}. Nothing was changed.")
+        entities = spec.get("entities")
+        if not isinstance(entities, list) or not entities:
+            raise ToolError("A sketch needs at least one entity (rectangle, circle or line). Nothing was changed.")
+        out = []
+        for index, entity in enumerate(entities):
+            if not isinstance(entity, dict):
+                raise ToolError(f"Sketch entity {index} is not an object. Nothing was changed.")
+            kind_of = entity.get("type")
+            if kind_of in ("rectangle", "line"):
+                x1, y1, x2, y2 = (_finite(entity.get(k), f"entity {index} {k}") * mm for k in ("x1", "y1", "x2", "y2"))
+                if kind_of == "rectangle" and (x1 == x2 or y1 == y2):
+                    raise ToolError(f"Rectangle {index} has zero width or height. Nothing was changed.")
+                if kind_of == "line" and (x1, y1) == (x2, y2):
+                    raise ToolError(f"Line {index} has zero length. Nothing was changed.")
+                out.append({"type": kind_of, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+            elif kind_of == "circle":
+                out.append({
+                    "type": "circle",
+                    "cx": _finite(entity.get("cx"), f"entity {index} cx") * mm,
+                    "cy": _finite(entity.get("cy"), f"entity {index} cy") * mm,
+                    "radius": _positive(entity.get("radius"), f"entity {index} radius") * mm,
+                })
+            else:
+                raise ToolError(f"Sketch entity {index} has type {kind_of!r}; use rectangle, circle or line. Nothing was changed.")
+        return {"plane": plane, "entities": out}
+    if kind == "extrude":
+        sketch = spec.get("sketch_name")
+        if not isinstance(sketch, str) or not sketch:
+            raise ToolError("sketch_name must name the sketch to extrude. Nothing was changed.")
+        operation = spec.get("operation", "NEW")
+        if operation not in EXTRUDE_OPERATIONS:
+            raise ToolError(f"operation must be one of {', '.join(EXTRUDE_OPERATIONS)}. Nothing was changed.")
+        end = spec.get("end", "BLIND")
+        if end not in END_BOUNDS:
+            raise ToolError(f"end must be one of {', '.join(END_BOUNDS)}. Nothing was changed.")
+        depth = _positive(spec.get("depth_mm"), "depth_mm") * mm if end == "BLIND" else 0.0
+        return {"sketch_name": sketch, "operation": operation, "end": end, "depth_m": depth,
+                "opposite_direction": bool(spec.get("opposite_direction"))}
+    if kind in ("fillet", "chamfer"):
+        points = spec.get("edge_points_mm")
+        if not isinstance(points, list) or not points:
+            raise ToolError("edge_points_mm must list one point on each edge, as [x, y, z] in millimetres. Nothing was changed.")
+        checked = []
+        for index, point in enumerate(points):
+            if not isinstance(point, list) or len(point) != 3:
+                raise ToolError(f"Edge point {index} must be [x, y, z] in millimetres. Nothing was changed.")
+            checked.append([_finite(v, f"edge point {index}") * mm for v in point])
+        size_key = "radius_mm" if kind == "fillet" else "distance_mm"
+        return {"edge_points_m": checked, "size_m": _positive(spec.get(size_key), size_key) * mm}
+    raise ToolError("kind must be sketch, extrude, fillet or chamfer. Nothing was changed.")
+
+
+def integrity_compare(before: Dict[str, Any], after: Dict[str, Any], made: List[str]) -> Dict[str, Any]:
+    """`clean` only when both snapshots were read and the feature names after are exactly the names
+    before plus `made`. Bodies are recorded (an extrude adds one); a missing body list is not_checked."""
+    if any(s.get(k) is None for s in (before, after) for k in ("features", "bodies")):
+        return {"result": "not_checked", "detail": "A feature or body list could not be read.", "before": before, "after": after}
+    before_names = [f["name"] for f in before["features"]]
+    after_names = [f["name"] for f in after["features"]]
+    unexpected = [n for n in after_names if n not in before_names and n not in made]
+    missing = [n for n in before_names + list(made) if n not in after_names]
+    if not unexpected and not missing and len(after_names) == len(before_names) + len(made):
+        return {"result": "clean", "before": before, "after": after}
+    return {
+        "result": "foreign",
+        "unexpected_features": unexpected,
+        "missing_features": missing,
+        "detail": "The feature list after the step is not the list before plus what this step made.",
+        "before": before,
+        "after": after,
+    }
 
 
 class StateLock:
@@ -486,6 +602,180 @@ class SolidWorksSession:
         ok = doc.Save3(SW_SAVE_AS_SILENT, errors, warnings)
         return {"ok": bool(ok), "errors": errors.value, "warnings": warnings.value}
 
+    # bodies, faces and references -------------------------------------------
+
+    def bodies(self, doc: Any) -> Optional[List[Dict[str, Any]]]:
+        """Solid bodies by name, or None when SOLIDWORKS returns no answer (unknown, never empty)."""
+        if doc.GetType() != SW_DOC_PART:
+            return None
+        try:
+            found = doc.GetBodies2(SW_SOLID_BODY, False)
+        except Exception as err:  # noqa: BLE001
+            log(f"GetBodies2 raised: {err}")
+            return None
+        return [{"name": body.Name, "face_count": len(body.GetFaces() or [])} for body in (found or [])]
+
+    def faces(self, doc: Any) -> List[Dict[str, Any]]:
+        out = []
+        for body in doc.GetBodies2(SW_SOLID_BODY, False) or []:
+            faces = []
+            for face in body.GetFaces() or []:
+                surface = face.GetSurface()
+                entry: Dict[str, Any] = {"area_m2": face.GetArea()}
+                if surface.IsPlane():
+                    params = list(surface.PlaneParams)  # normal xyz, root point xyz (metres)
+                    entry.update(surface="PLANE", normal=params[0:3], origin_m=params[3:6])
+                elif surface.IsCylinder():
+                    params = list(surface.CylinderParams)  # origin xyz, axis xyz, radius (metres)
+                    entry.update(surface="CYLINDER", origin_m=params[0:3], axis=params[3:6], radius_m=params[6])
+                else:
+                    entry["surface"] = "OTHER"
+                faces.append(entry)
+            out.append({"name": body.Name, "face_count": len(faces), "faces": faces})
+        return out
+
+    def external_reference_count(self, doc: Any) -> Optional[int]:
+        """External file references SOLIDWORKS reports, or None when it cannot say."""
+        for call in (lambda: doc.Extension.ListExternalFileReferenceCount(), lambda: doc.ListExternalFileReferencesCount(False)):
+            try:
+                count = call()
+                if isinstance(count, int) and count >= 0:
+                    return count
+            except Exception as err:  # noqa: BLE001
+                log(f"external reference count raised: {err}")
+        return None
+
+    def edges_at(self, doc: Any, point_m: List[float]) -> int:
+        """How many solid-body edges pass within EDGE_TOLERANCE_M of a point."""
+        x, y, z = point_m
+        count = 0
+        for body in doc.GetBodies2(SW_SOLID_BODY, False) or []:
+            for edge in body.GetEdges() or []:
+                closest = edge.GetClosestPointOn(x, y, z)
+                if closest is None:
+                    continue
+                cx, cy, cz = list(closest)[0:3]
+                if ((cx - x) ** 2 + (cy - y) ** 2 + (cz - z) ** 2) ** 0.5 <= EDGE_TOLERANCE_M:
+                    count += 1
+        return count
+
+    # building ------------------------------------------------------------------
+
+    def part_template(self) -> str:
+        template = os.environ.get("SOLIDWORKS_PART_TEMPLATE") or self.app.GetUserPreferenceStringValue(SW_DEFAULT_TEMPLATE_PART)
+        if not template or not str(template).lower().endswith(".prtdot") or not Path(str(template)).is_file():
+            raise ToolError(
+                f"No usable part template (got {template!r}). Set the default part template in SOLIDWORKS "
+                "(System Options > Default Templates), or set SOLIDWORKS_PART_TEMPLATE to a .prtdot file. Nothing was created."
+            )
+        return str(template)
+
+    def new_part(self, template: str) -> Any:
+        doc = self.app.NewDocument(template, 0, 0, 0)
+        if doc is None:
+            raise ToolError("SOLIDWORKS did not create a new part from the template. Nothing was created.")
+        return doc
+
+    def save_as(self, doc: Any, new_path: str) -> Dict[str, Any]:
+        errors, warnings = self._out_int(), self._out_int()
+        ok = doc.Extension.SaveAs3(new_path, SW_SAVE_AS_CURRENT_VERSION, SW_SAVE_AS_SILENT, None, None, errors, warnings)
+        return {"ok": bool(ok), "errors": errors.value, "warnings": warnings.value}
+
+    def import_step(self, path: str) -> Any:
+        errors = self._out_int()
+        doc = self.app.LoadFile4(path, "r", None, errors)
+        if doc is None:
+            raise ToolError(f"SOLIDWORKS could not import {path} (load error {errors.value}). Nothing was created.")
+        return doc
+
+    def plane_feature(self, doc: Any, plane: str) -> Any:
+        """The reference plane named "<plane> Plane". None when the template names its planes otherwise:
+        then the bridge cannot be sure which plane is which, and does not guess."""
+        for feature in self._walk_features(doc):
+            if feature.GetTypeName2() == "RefPlane" and feature.Name == f"{plane} Plane":
+                return feature
+        return None
+
+    def sketch(self, doc: Any, plane: Any, entities: List[Dict[str, Any]]) -> None:
+        doc.ClearSelection2(True)
+        if not plane.Select2(False, 0):
+            raise ToolError("SOLIDWORKS did not select the sketch plane.")
+        manager = doc.SketchManager
+        manager.AddToDB = True  # no snapping or inferencing: the coordinates go in as given
+        try:
+            manager.InsertSketch(True)
+            for entity in entities:
+                if entity["type"] == "rectangle":
+                    made = manager.CreateCornerRectangle(entity["x1"], entity["y1"], 0, entity["x2"], entity["y2"], 0)
+                elif entity["type"] == "circle":
+                    made = manager.CreateCircleByRadius(entity["cx"], entity["cy"], 0, entity["radius"])
+                else:
+                    made = manager.CreateLine(entity["x1"], entity["y1"], 0, entity["x2"], entity["y2"], 0)
+                if made is None:
+                    raise ToolError(f"SOLIDWORKS did not create the sketch {entity['type']}.")
+        finally:
+            manager.InsertSketch(True)
+            manager.AddToDB = False
+            doc.ClearSelection2(True)
+
+    def extrude(self, doc: Any, spec: Dict[str, Any]) -> Optional[str]:
+        sketch = doc.FeatureByName(spec["sketch_name"])
+        doc.ClearSelection2(True)
+        if sketch is None or not sketch.Select2(False, 0):
+            raise ToolError(f"SOLIDWORKS did not select the sketch {spec['sketch_name']}.")
+        end = SW_END_BLIND if spec["end"] == "BLIND" else SW_END_THROUGH_ALL
+        manager = doc.FeatureManager
+        if spec["operation"] == "REMOVE":
+            feature = manager.FeatureCut4(
+                True, False, spec["opposite_direction"], end, 0, spec["depth_m"], 0, False, False, False, False, 0, 0,
+                False, False, False, False, False, False, True, False, True, False, SW_START_SKETCH_PLANE, 0, False, False,
+            )
+        else:
+            feature = manager.FeatureExtrusion3(
+                True, False, spec["opposite_direction"], end, 0, spec["depth_m"], 0, False, False, False, False, 0, 0,
+                False, False, False, False, spec["operation"] == "ADD", False, True, SW_START_SKETCH_PLANE, 0, False,
+            )
+        doc.ClearSelection2(True)
+        return feature.Name if feature is not None else None
+
+    def select_edges(self, doc: Any, points_m: List[List[float]]) -> None:
+        doc.ClearSelection2(True)
+        for x, y, z in points_m:
+            if not doc.Extension.SelectByID2("", "EDGE", x, y, z, True, 0, None, 0):
+                raise ToolError(f"SOLIDWORKS did not select the edge at {[x, y, z]} m.")
+        selected = doc.SelectionManager.GetSelectedObjectCount2(-1)
+        if selected != len(points_m):
+            raise ToolError(f"SOLIDWORKS selected {selected} entities for {len(points_m)} edge points.")
+
+    def fillet(self, doc: Any, spec: Dict[str, Any]) -> Optional[str]:
+        self.select_edges(doc, spec["edge_points_m"])
+        feature = doc.FeatureManager.FeatureFillet3(
+            SW_FILLET_UNIFORM_RADIUS, spec["size_m"], 0, 0, SW_FILLET_TYPE_SIMPLE, SW_FILLET_OVERFLOW_DEFAULT, 0,
+            None, None, None, None, None, None, None,
+        )
+        doc.ClearSelection2(True)
+        return feature.Name if feature is not None else None
+
+    def chamfer(self, doc: Any, spec: Dict[str, Any]) -> Optional[str]:
+        self.select_edges(doc, spec["edge_points_m"])
+        feature = doc.FeatureManager.InsertFeatureChamfer(0, SW_CHAMFER_EQUAL_DISTANCE, spec["size_m"], 0, spec["size_m"], 0, 0, 0)
+        doc.ClearSelection2(True)
+        return feature.Name if feature is not None else None
+
+    def feature_face_count(self, doc: Any, name: str) -> Optional[int]:
+        feature = doc.FeatureByName(name)
+        if feature is None:
+            return None
+        count = feature.GetFaceCount()
+        return count if isinstance(count, int) else None
+
+    def delete_feature(self, doc: Any, name: str) -> bool:
+        feature = doc.FeatureByName(name)
+        doc.ClearSelection2(True)
+        if feature is None or not feature.Select2(False, 0):
+            return False
+        return bool(doc.EditDelete())
+
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -816,6 +1106,225 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
         if not result["ok"]:
             raise ToolError(f"SOLIDWORKS did not save (errors {result['errors']}, warnings {result['warnings']}).")
         return {"saved": args["expected_path"], **result}
+
+    # -------------------------------------------------------------- new parts, STEP import, building
+
+    def snapshot(doc: Any) -> Dict[str, Any]:
+        try:
+            features = session().feature_list(doc)
+        except Exception as err:  # noqa: BLE001
+            log(f"feature list failed: {err}")
+            features = None
+        return {
+            "features": features,
+            "sketches": [f["name"] for f in features if f["type"] == "ProfileFeature"] if features is not None else None,
+            "bodies": session().bodies(doc),
+        }
+
+    def check_step_path(step_path: str) -> Path:
+        source = Path(step_path)
+        if source.suffix.lower() not in (".step", ".stp"):
+            raise ToolError("step_path must be a .step or .stp file. Nothing was imported.")
+        if not source.is_file():
+            raise ToolError(f"No file at {step_path}. Nothing was imported.")
+        size = source.stat().st_size
+        if size == 0 or size > MAX_IMPORT_BYTES:
+            raise ToolError(f"The file is {size} bytes; the bridge imports files from 1 byte to {MAX_IMPORT_BYTES} bytes. Nothing was imported.")
+        return source
+
+    def save_new(doc: Any, target: Path, record: Dict[str, Any]) -> Any:
+        result = session().save_as(doc, str(target))
+        if not result["ok"] or not target.exists():
+            raise ToolError(f"SOLIDWORKS did not save the new part to {target} (errors {result['errors']}, warnings {result['warnings']}).")
+        if normalise(doc.GetPathName() or "") != normalise(str(target)):
+            raise ToolError(f"The new part was saved, but its document is at {doc.GetPathName()}, not {target}. Stopping before any write.")
+        try:
+            protected.register_copy(str(target), {**record, "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat()})
+        except OSError as err:
+            raise ToolError(f"The part was saved to {target}, but the bridge could not record it ({err}), so it will not write to it.") from err
+        return doc
+
+    @server.tool(
+        "sw_new_part",
+        "Create a NEW part from the default part template, save it at a new path, and register it as a file the "
+        "bridge may write: the document an estimating model is built in from a drawing or text (rfq-to-quote paths "
+        "C2 and A). Refuses an existing path. Checks the new part holds no sketch and no body. Name it "
+        "<inquiry>_L<line>_<part>_R<rev>.SLDPRT." + UNVERIFIED,
+        {"new_path": PATH},
+        ["new_path"],
+        read_only=False,
+    )
+    def new_part(args: Dict[str, Any]) -> Dict[str, Any]:
+        protected._require_readable()
+        target = check_new_path(args["new_path"], protected)
+        if target.suffix.upper() != ".SLDPRT":
+            raise ToolError("new_path must end in .SLDPRT. Nothing was created.")
+        template = session().part_template()
+        doc = save_new(session().new_part(template), target, {"kind": "created", "template": template})
+        contents = snapshot(doc)
+        if contents["features"] is None or contents["sketches"] or contents["bodies"] is None or contents["bodies"]:
+            protected.retire_copy(str(target), "a new part was not empty, or its contents could not be read")
+            raise ToolError(f"The new part {target} is not empty, or its contents could not be read. The bridge will not build in it.")
+        return {"path": str(target), "template": template, "contents": contents}
+
+    @server.tool(
+        "sw_list_contents",
+        "List the active document's FeatureManager tree (sketches are type ProfileFeature), its solid bodies, and the "
+        "number of external file references SOLIDWORKS reports. Read-only. Call before and after every build or "
+        "adapt step: the integrity check." + UNVERIFIED,
+    )
+    def list_contents(_: Dict[str, Any]) -> Dict[str, Any]:
+        doc = session().active_doc()
+        count = session().external_reference_count(doc)
+        return {
+            "document": doc.GetPathName() or doc.GetTitle(),
+            **snapshot(doc),
+            "external_references": {
+                "present": None if count is None else count > 0,
+                "count": count,
+                "basis": "The external file reference count SOLIDWORKS reports for this document (in-context and derived "
+                "references). None means SOLIDWORKS gave no answer: record unknown.",
+            },
+            "integrity_note": INTEGRITY_NOTE,
+        }
+
+    @server.tool(
+        "sw_read_faces",
+        "Solid bodies and faces of the active part: each face's area, and for planes the normal, for cylinders the "
+        "radius and axis (metres). For an imported STEP model, holes and pockets are read from these faces: each one "
+        "is a reading to confirm, not a feature. Read-only." + UNVERIFIED,
+    )
+    def read_faces(_: Dict[str, Any]) -> Dict[str, Any]:
+        doc = session().active_doc()
+        if doc.GetType() != SW_DOC_PART:
+            raise ToolError("The active document is not a part. Faces are read from parts only.")
+        return {"document": doc.GetPathName() or doc.GetTitle(), "bodies": session().faces(doc), "units": "metres, square metres"}
+
+    @server.tool(
+        "sw_add_feature",
+        "Add one feature to the active part, which must be a file this bridge made (sw_new_part, sw_save_copy_and_open "
+        "or sw_import_step) at expected_path: kind sketch (spec: plane Front, Top or Right; entities of type rectangle "
+        "{x1,y1,x2,y2}, circle {cx,cy,radius} or line {x1,y1,x2,y2}, in mm), extrude (spec: sketch_name, operation NEW, "
+        "ADD or REMOVE for a cut or through hole, end BLIND with depth_mm or THROUGH_ALL, opposite_direction), fillet "
+        "(spec: edge_points_mm, one [x,y,z] on each edge, radius_mm) or chamfer (spec: edge_points_mm, distance_mm). "
+        "Checks the spec and, for fillet and chamfer, that each point is on exactly one edge, before changing anything. "
+        "Afterwards the part must rebuild, a fillet or chamfer must own a face per edge, and the feature list must be "
+        "the old one plus this feature; otherwise the feature is deleted again. Does not save." + UNVERIFIED,
+        {"expected_path": PATH, "kind": {"type": "string", "enum": ["chamfer", "extrude", "fillet", "sketch"]}, "spec": {"type": "object"}},
+        ["expected_path", "kind", "spec"],
+        read_only=False,
+    )
+    def add_feature(args: Dict[str, Any]) -> Dict[str, Any]:
+        doc = active_for_write(args["expected_path"])
+        kind = args["kind"]
+        spec = feature_spec(kind, args["spec"])  # the whole step is checked before anything changes
+        if doc.GetType() != SW_DOC_PART:
+            raise ToolError("The active document is not a part. Nothing was changed.")
+        before = snapshot(doc)
+        if before["features"] is None or before["bodies"] is None:
+            raise ToolError("SOLIDWORKS did not list this part's features or bodies, so the step cannot be checked. Nothing was changed.")
+        plane = None
+        if kind == "sketch":
+            plane = session().plane_feature(doc, spec["plane"])
+            if plane is None:
+                raise ToolError(f"No reference plane named \"{spec['plane']} Plane\" in this part, so the bridge cannot tell which plane is meant. Nothing was changed.")
+        if kind == "extrude" and not any(f["name"] == spec["sketch_name"] and f["type"] == "ProfileFeature" for f in before["features"]):
+            raise ToolError(f"No sketch named {spec['sketch_name']} in this part. Nothing was changed.")
+        if kind in ("fillet", "chamfer"):
+            problems = []
+            for point in spec["edge_points_m"]:
+                count = session().edges_at(doc, point)
+                if count != 1:
+                    problems.append(f"{[round(v * 1000, 4) for v in point]} mm: {count} edges")
+            if problems:
+                raise ToolError(f"Each edge point must lie on exactly one solid edge, so the right edges take the {kind}: {'; '.join(problems)}. Nothing was changed.")
+
+        before_names = [f["name"] for f in before["features"]]
+
+        def roll_back(reason: str, name: Optional[str]) -> None:
+            try:
+                now = [f["name"] for f in session().feature_list(doc)]
+                added = [n for n in now if n not in before_names]
+                for added_name in reversed(added if name is None else [name]):
+                    if not session().delete_feature(doc, added_name):
+                        raise ToolError(f"SOLIDWORKS did not delete {added_name}")
+                rebuilt = session().rebuild(doc)
+                if [f["name"] for f in session().feature_list(doc)] != before_names or not rebuilt:
+                    raise ToolError("the part after the delete is not the part before")
+            except Exception as err:  # noqa: BLE001
+                protected.retire_copy(args["expected_path"], f"a {kind} failed and could not be removed")
+                raise ToolError(
+                    f"{reason} Removing it did not succeed ({err}), so this part is in an unknown state and the bridge "
+                    "will not write to it again. Discard it and start a new one. Nothing was saved."
+                ) from err
+            raise ToolError(f"{reason} The feature was deleted again, so the part is as it was before this call. Nothing was saved.")
+
+        name: Optional[str] = None
+        try:
+            if kind == "sketch":
+                session().sketch(doc, plane, spec["entities"])
+            elif kind == "extrude":
+                name = session().extrude(doc, spec)
+            elif kind == "fillet":
+                name = session().fillet(doc, spec)
+            else:
+                name = session().chamfer(doc, spec)
+        except Exception as err:  # noqa: BLE001
+            roll_back(f"SOLIDWORKS failed the {kind}: {err}.", None)
+        rebuild_ok = session().rebuild(doc)
+        after = snapshot(doc)
+        added = [f["name"] for f in (after["features"] or []) if f["name"] not in before_names]
+        if kind == "sketch":
+            sketches = [f["name"] for f in (after["features"] or []) if f["name"] in added and f["type"] == "ProfileFeature"]
+            name = sketches[0] if len(sketches) == 1 else None
+        if name is None or name not in added:
+            roll_back(f"SOLIDWORKS did not report the new {kind}.", None)
+        health = health_of(doc, rebuild_ok)
+        if not health["regenerated"]:
+            roll_back(f"The part did not rebuild cleanly after the {kind}.", name)
+        faces_made = None
+        if kind in ("fillet", "chamfer"):
+            faces_made = session().feature_face_count(doc, name)
+            if faces_made is None or faces_made < len(spec["edge_points_m"]):
+                roll_back(f"The {kind} owns {'an unknown number of' if faces_made is None else faces_made} face(s) for {len(spec['edge_points_m'])} edge(s), so not every edge took it.", name)
+        integrity = integrity_compare(before, after, [name])
+        if integrity["result"] == "foreign":
+            protected.retire_copy(args["expected_path"], "unexpected features appeared during a build step")
+            raise ToolError(
+                "The feature list after this step holds features this step did not make. The step fails; the bridge will "
+                f"not write to this part again. {json.dumps({k: integrity[k] for k in ('unexpected_features', 'missing_features')})}"
+            )
+        return {"feature": name, "kind": kind, "faces_made": faces_made, "health": health, "document_integrity": integrity, "saved": False}
+
+    @server.tool(
+        "sw_import_step",
+        "Import a customer's STEP file (rfq-to-quote path C1) as a part, save it at a NEW .SLDPRT path, and register "
+        "that file as one the bridge may write. The STEP file is read, never changed. Refuses a STEP that opens as an "
+        "assembly. Nothing is built on the imported bodies: read them with sw_read_faces." + UNVERIFIED,
+        {"step_path": PATH, "new_path": PATH},
+        ["step_path", "new_path"],
+        read_only=False,
+    )
+    def import_step(args: Dict[str, Any]) -> Dict[str, Any]:
+        protected._require_readable()
+        source = check_step_path(args["step_path"])
+        target = check_new_path(args["new_path"], protected)
+        if target.suffix.upper() != ".SLDPRT":
+            raise ToolError("new_path must end in .SLDPRT. Nothing was imported.")
+        digest = file_fingerprint(source)["sha256"]
+        doc = session().import_step(str(source))
+        if doc.GetType() != SW_DOC_PART:
+            raise ToolError(
+                "The STEP file opened as an assembly, not a part. The bridge imports single parts only; ask the engineer "
+                "for the part, or read the file as text, unverified. Nothing was saved."
+            )
+        save_new(doc, target, {"kind": "imported", "source_file": str(source), "source_sha256": digest})
+        contents = snapshot(doc)
+        if not contents["bodies"]:
+            protected.retire_copy(str(target), "the import produced no solid body")
+            raise ToolError("The import finished but SOLIDWORKS lists no solid body. Treat the import as failed.")
+        return {"path": str(target), "source": str(source), "source_sha256": digest, **contents,
+                "origin": "customer_step", "next": "Read faces with sw_read_faces; build nothing on these bodies."}
 
     return server
 

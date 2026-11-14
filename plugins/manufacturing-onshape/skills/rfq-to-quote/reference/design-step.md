@@ -42,7 +42,7 @@ makes a C2 line a B line. An earlier revision of the same part never does.
 | `C1` STEP, no drawing | **Imports the STEP and reads it.** Nothing generated. STEP import through the connector is **unverified** | *Path C1* |
 | `none` repeat part | Nothing to build. Priced from its routing or actuals, or a question back | |
 
-**Name the path that actually ran.** A path B line that fell back
+**Name the path that actually ran.** A path B line built from the drawing
 because the prior model was not there is reported as C2 with the reason, never
 as path B: calling it B would tell the estimator a prior part's proven geometry
 was reused when it was not.
@@ -58,12 +58,22 @@ and after its CAD step, and every path stops at Gate 3.
 
 ## Building the model — path C2
 
-**In this edition the Onshape bridge does not build models from drawings**
-(`../../design-space-explore/reference/cad-adapter.md`, *What this version does
-not do*). Path C2 runs as *When Onshape is not there* below — the hand-entered
-feature list, prefilled from the drawing — and says so in one line on the
-internal sheet: *"Onshape connected; the bridge does not build models from drawings yet. Hand-entered feature list."* The steps below are what that list, and a
-future build, must carry, and stay the rules for Gate 3:
+Read `../../design-space-explore/reference/cad-adapter.md` first: the bridge's
+create-from-scratch tools, and the behaviors that break a naive build. The
+rules that matter most:
+
+- Onshape connected: an Onshape API key set in the environment, the bundled bridge connected.
+- The bridge builds only in a document it made (`onshape_create_document`).
+- One feature per `onshape_add_feature` call; it checks the feature and undoes it
+  if the check fails.
+- Dimensions in millimetres. Fillet and chamfer edges are named by a point
+  mid-edge.
+- Sketch, extrude, cut, fillet and chamfer only. A thread, loft or sheet-metal
+  feature is hand-entered beside the model, and said so.
+- **Building through the Onshape bridge is unverified**: it has not been run
+  against a live Onshape account. Say so at Gate 3.
+
+Then:
 
 1. **Create a new document**, named for the inquiry, line, part and revision —
    even when the open document is empty. The open document is the user's.
@@ -139,12 +149,10 @@ version, `document_ref` the new document.
 on file, not found, the user cannot open it, unsaved changes in it, a change
 that is not its parameter, a failed regeneration, a read-back that does not
 match the drawing. Say it in one line, in these words, naming both paths so
-the estimator sees which one ran: *"Path B: PN-4402-A model not on file;
-hand-entered feature list from the drawing (C2), not built in CAD."* In this
-edition the Onshape bridge does not build from drawings, so emit the estimate as
-`geometry_path: C2`, `origin: hand_entered`, `cad_backend: none`,
-`base_model_ref: null`, with the fallback and its reason as the first entry in
-`questions_for_estimator`.
+the estimator sees which one ran: *"Path B: PN-4402-A model not on file; built
+from the drawing as C2."* Emit the estimate as `geometry_path: C2`,
+`origin: built_from_drawing`, `base_model_ref: null`, with the fallback and its
+reason as the first entry in `questions_for_estimator`.
 
 The open, save-as-new and untouched-check calls have not been run through the
 connector. Say so at Gate 3 when path B ran.
@@ -174,19 +182,20 @@ document, per `../../quote-build/reference/hours-ladder.md`, *Path A*. A Gate 3
 yes does not make it firm, and neither does an override. A firm quote needs a
 drawing, and the drawing re-runs step 7 as C2.
 
-In this edition, and without Onshape: the hand-entered feature list, prefilled
-from the text, every row `from_text`, `origin: hand_entered`. Still a ROM.
+Without Onshape: the hand-entered feature list, prefilled from the text, every
+row `from_text`, `origin: hand_entered`. Still a ROM.
 
 ## Path C1 — import a STEP file and read it
 
 A STEP or other 3D file and no drawing. **Nothing is generated**: no sketch,
 no extrude, no change to the customer's geometry.
 
-**The Onshape bridge does not import STEP files in this edition.** Go straight
-to the steps under *When the import fails or Onshape is not connected*. Where the
-engineer imports the STEP into Onshape themselves and gives you the result, read
-it read-only and label it as a model the engineer imported, then read bodies,
-bounding box (approximate), volume and faces read-only. Holes, pockets and faces are recognised from the
+**STEP import through the Onshape bridge is unverified.** It has not been run
+against a live Onshape account. Say so on the line, every time.
+
+With Onshape: import the STEP with `onshape_import_step` into a new document named
+like any estimating model, integrity check before and after (`onshape_list_contents`),
+then read bodies, bounding box, volume and faces read-only (`onshape_read_faces`). Holes, pockets and faces are recognised from the
 faces; each is a reading to confirm at Gate 3, with its `source_ref` naming the
 file and the body or face. Then stock, datums (every one `inferred`: a STEP
 file identifies none), setups, operations and questions as for C2. Emit
@@ -217,8 +226,7 @@ A C1 line that also has a drawing is C2: the drawing is the geometry.
 ## When Onshape is not there
 
 The chain completes; step 7 changes shape, and says so in one line on the
-internal sheet: *"Onshape not connected — no model built."* — or, where Onshape is
-connected but the path is one this edition cannot build, *"Onshape connected; the bridge does not build models from drawings yet. Hand-entered feature list."*
+internal sheet: *"Onshape not connected — no model built."*
 
 - **Offer a hand-entered feature list.** Prefill it from the drawing (path C2
   or B) or the text (path A) as intake read it — every feature with its view, zone and reading basis —

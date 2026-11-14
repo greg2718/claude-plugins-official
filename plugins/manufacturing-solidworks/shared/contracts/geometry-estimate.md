@@ -63,7 +63,7 @@ in.
 
 | Field | Type | Behavior | Notes |
 |---|---|---|---|
-| `origin` | enum | Required | `built_from_drawing`, `adapted_from_prior`, `customer_step`, `built_from_text`, `hand_entered`. Per the path table above. `geometry_path` is the path that actually ran: a path B line that fell back is `C2` and, in this SOLIDWORKS edition, `hand_entered`, because the bridge does not build from drawings |
+| `origin` | enum | Required | `built_from_drawing`, `adapted_from_prior`, `customer_step`, `built_from_text`, `hand_entered`. Per the path table above. `geometry_path` is the path that actually ran: a path B line that fell back is `C2` and `built_from_drawing` |
 | `document_ref` | string or null | Degrades | The new SOLIDWORKS file the model lives in. Null on `hand_entered` |
 | `base_model_ref` | string or null | Optional | The prior part's model and the version it was opened at, path B only. **Never overwritten** — the producer reads its version again after the run and stops if it moved. Null on every other path, including a path B line that fell back to C2 |
 | `cad_backend` | enum | Required | `solidworks` or `none`. `none` on `hand_entered`, and on `customer_step` when the STEP was read as text without CAD |
@@ -155,7 +155,7 @@ context. The skill that built the model never marks it confirmed.
 
 ## Worked example
 
-PN-4471-B Rev 2, path C2, built in CAD from the drawing (an example from the upstream edition; this SOLIDWORKS edition hand-enters C2 lines). Integrity clean.
+PN-4471-B Rev 2, path C2, built in SOLIDWORKS from the drawing. Integrity clean.
 Datum A is identified on the drawing; B and C are referenced in the KC-2
 feature control frame but their features are not identified, so they are
 inferred and go to Gate 3.

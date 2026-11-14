@@ -2,7 +2,10 @@
 """Onshape bridge: the CAD adapter surface of manufacturing-onshape, over MCP stdio.
 
 Implements the operations `skills/design-space-explore/reference/cad-adapter.md`
-lists, against Onshape's public REST API. Standard library only.
+lists (variants, open-apply-save-as-new, building a part from a drawing, STEP
+import, and the integrity check), against Onshape's public REST API. Standard
+library only. It writes only to documents it made: copies, new documents and
+imported documents. CAM is not implemented: Onshape publishes no CAM Studio API.
 
 Credentials come from the environment and never from the conversation:
 
@@ -39,7 +42,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp_stdio import Server, ToolError, log  # noqa: E402
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 UNVERIFIED = " (Not yet run against a live Onshape account.)"
 
 # Feature parameter ids that hold a Part Studio variable's value, by variable type.
@@ -126,11 +129,22 @@ class OnshapeClient:
         self.sleep = sleep
         self.calls = 0
 
-    def request(self, method: str, endpoint: str, query: Optional[Dict[str, Any]] = None, body: Any = None) -> Any:
+    def request(
+        self,
+        method: str,
+        endpoint: str,
+        query: Optional[Dict[str, Any]] = None,
+        body: Any = None,
+        raw: Optional[Tuple[bytes, str]] = None,
+    ) -> Any:
+        """`body` is sent as JSON; `raw` is (bytes, content type), for a multipart upload."""
         path = f"/api/{self.api_version}{endpoint}"
         query_string = urllib.parse.urlencode(query or {}, doseq=True)
-        data = None if body is None else json.dumps(body).encode("utf-8")
-        content_type = "application/json"
+        if raw is not None:
+            data, content_type = raw
+        else:
+            data = None if body is None else json.dumps(body).encode("utf-8")
+            content_type = "application/json"
         for attempt in range(2):
             nonce = make_nonce()
             date = http_date()
@@ -358,10 +372,354 @@ def feature_inventory(features_response: Any) -> List[Dict[str, Any]]:
 
 
 INTEGRITY_NOTE = (
-    "The feature list is read from Onshape (sketches are the features of type newSketch). The bridge cannot list "
-    "bodies or external references (derived parts, references to other documents) yet: record the integrity check "
-    "as not_checked, with the feature lists, and external references as unknown. Never record them as clean or absent."
+    "Use onshape_list_contents before and after a step for the integrity check: it lists features (sketches are "
+    "the features of type newSketch), bodies, and the external references the feature list shows. Record the "
+    "check as clean only when both reads succeeded and the after-list holds exactly the before-list plus what "
+    "the step made."
 )
+
+# ---------------------------------------------------------------------------
+# Building features (unit-tested). Lengths come in millimetres and go to Onshape in metres
+# (sketch geometry) or as expressions with units (feature parameters).
+# ---------------------------------------------------------------------------
+
+PLANES = ("Top", "Front", "Right")
+EXTRUDE_OPERATIONS = ("NEW", "ADD", "REMOVE")
+END_BOUNDS = ("BLIND", "THROUGH_ALL")
+GOOD_STATUSES = ("OK", "INFO", "WARNING")
+MAX_IMPORT_BYTES = 100 * 1024 * 1024
+
+
+def _finite(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf")):
+        raise ToolError(f"{label} must be a finite number in millimetres, not {value!r}. Nothing was written.")
+    return float(value)
+
+
+def _positive(value: Any, label: str) -> float:
+    number = _finite(value, label)
+    if number <= 0:
+        raise ToolError(f"{label} must be greater than zero, not {value!r}. Nothing was written.")
+    return number
+
+
+def _feature_name(spec: Dict[str, Any], default: str) -> str:
+    name = spec.get("name", default)
+    if not isinstance(name, str) or not name.strip() or len(name) > 100:
+        raise ToolError("name must be a non-empty string of at most 100 characters. Nothing was written.")
+    return name
+
+
+def _line_entity(entity_id: str, x1: float, y1: float, x2: float, y2: float) -> Dict[str, Any]:
+    """A sketch line segment in metres (BTMSketchCurveSegment-155 over BTCurveGeometryLine-117)."""
+    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+    if length <= 0:
+        raise ToolError(f"Sketch line {entity_id} has zero length. Nothing was written.")
+    return {
+        "btType": "BTMSketchCurveSegment-155",
+        "entityId": entity_id,
+        "startPointId": f"{entity_id}.start",
+        "endPointId": f"{entity_id}.end",
+        "startParam": 0.0,
+        "endParam": length,
+        "geometry": {
+            "btType": "BTCurveGeometryLine-117",
+            "pntX": x1,
+            "pntY": y1,
+            "dirX": (x2 - x1) / length,
+            "dirY": (y2 - y1) / length,
+        },
+    }
+
+
+def sketch_entities(entities: Any) -> List[Dict[str, Any]]:
+    """Rectangles, circles and lines (millimetres, in the sketch plane's x and y) as Onshape sketch entities."""
+    if not isinstance(entities, list) or not entities:
+        raise ToolError("A sketch needs at least one entity (rectangle, circle or line). Nothing was written.")
+    out: List[Dict[str, Any]] = []
+    for index, entity in enumerate(entities):
+        if not isinstance(entity, dict):
+            raise ToolError(f"Sketch entity {index} is not an object. Nothing was written.")
+        kind = entity.get("type")
+        tag = f"e{index}"
+        mm = 0.001
+        if kind == "rectangle":
+            x1, y1 = _finite(entity.get("x1"), f"entity {index} x1"), _finite(entity.get("y1"), f"entity {index} y1")
+            x2, y2 = _finite(entity.get("x2"), f"entity {index} x2"), _finite(entity.get("y2"), f"entity {index} y2")
+            if x1 == x2 or y1 == y2:
+                raise ToolError(f"Rectangle {index} has zero width or height. Nothing was written.")
+            corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+            for side in range(4):
+                (ax, ay), (bx, by) = corners[side], corners[(side + 1) % 4]
+                out.append(_line_entity(f"{tag}.side{side}", ax * mm, ay * mm, bx * mm, by * mm))
+        elif kind == "circle":
+            cx, cy = _finite(entity.get("cx"), f"entity {index} cx"), _finite(entity.get("cy"), f"entity {index} cy")
+            radius = _positive(entity.get("radius"), f"entity {index} radius")
+            out.append(
+                {
+                    "btType": "BTMSketchCurve-4",
+                    "entityId": tag,
+                    "centerId": f"{tag}.center",
+                    "geometry": {
+                        "btType": "BTCurveGeometryCircle-115",
+                        "radius": radius * mm,
+                        "xCenter": cx * mm,
+                        "yCenter": cy * mm,
+                        "xDir": 1,
+                        "yDir": 0,
+                        "clockwise": False,
+                    },
+                }
+            )
+        elif kind == "line":
+            values = [_finite(entity.get(k), f"entity {index} {k}") for k in ("x1", "y1", "x2", "y2")]
+            out.append(_line_entity(tag, *(v * mm for v in values)))
+        else:
+            raise ToolError(f"Sketch entity {index} has type {kind!r}; use rectangle, circle or line. Nothing was written.")
+    return out
+
+
+def sketch_feature(spec: Dict[str, Any]) -> Dict[str, Any]:
+    plane = spec.get("plane")
+    if plane not in PLANES:
+        raise ToolError(f"plane must be one of {', '.join(PLANES)}. Nothing was written.")
+    return {
+        "btType": "BTMSketch-151",
+        "featureType": "newSketch",
+        "name": _feature_name(spec, "Sketch"),
+        "parameters": [
+            {
+                "btType": "BTMParameterQueryList-148",
+                "parameterId": "sketchPlane",
+                "queries": [
+                    {"btType": "BTMIndividualQuery-138", "queryString": f'query=qCreatedBy(makeId("{plane}"), EntityType.FACE);'}
+                ],
+            }
+        ],
+        "entities": sketch_entities(spec.get("entities")),
+        "constraints": [],
+    }
+
+
+def _enum(parameter_id: str, value: str, enum_name: str) -> Dict[str, Any]:
+    return {"btType": "BTMParameterEnum-145", "parameterId": parameter_id, "value": value, "enumName": enum_name}
+
+
+def _quantity(parameter_id: str, millimetres: float) -> Dict[str, Any]:
+    return {"btType": "BTMParameterQuantity-147", "parameterId": parameter_id, "expression": f"{millimetres:g} mm"}
+
+
+def extrude_feature(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Extrude a sketch's regions: a new body, added to bodies, or removed from them (a cut or a through hole)."""
+    sketch_id = spec.get("sketch_feature_id")
+    if not isinstance(sketch_id, str) or not sketch_id:
+        raise ToolError("sketch_feature_id must name the sketch to extrude. Nothing was written.")
+    operation = spec.get("operation", "NEW")
+    if operation not in EXTRUDE_OPERATIONS:
+        raise ToolError(f"operation must be one of {', '.join(EXTRUDE_OPERATIONS)}. Nothing was written.")
+    end = spec.get("end", "BLIND")
+    if end not in END_BOUNDS:
+        raise ToolError(f"end must be one of {', '.join(END_BOUNDS)}. Nothing was written.")
+    parameters = [
+        _enum("bodyType", "SOLID", "ExtendedToolBodyType"),
+        _enum("operationType", operation, "NewBodyOperationType"),
+        {
+            "btType": "BTMParameterQueryList-148",
+            "parameterId": "entities",
+            "queries": [{"btType": "BTMIndividualSketchRegionQuery-140", "featureId": sketch_id}],
+        },
+        _enum("endBound", end, "BoundingType"),
+    ]
+    if end == "BLIND":
+        parameters.append(_quantity("depth", _positive(spec.get("depth_mm"), "depth_mm")))
+    if spec.get("opposite_direction"):
+        parameters.append({"btType": "BTMParameterBoolean-144", "parameterId": "oppositeDirection", "value": True})
+    return {
+        "btType": "BTMFeature-134",
+        "featureType": "extrude",
+        "name": _feature_name(spec, "Extrude"),
+        "parameters": parameters,
+        "returnAfterSubfeatures": False,
+        "suppressed": False,
+    }
+
+
+def edge_points(spec: Dict[str, Any]) -> List[Tuple[float, float, float]]:
+    points = spec.get("edge_points_mm")
+    if not isinstance(points, list) or not points:
+        raise ToolError("edge_points_mm must list one point on each edge, as [x, y, z] in millimetres. Nothing was written.")
+    out = []
+    for index, point in enumerate(points):
+        if not isinstance(point, list) or len(point) != 3:
+            raise ToolError(f"Edge point {index} must be [x, y, z] in millimetres. Nothing was written.")
+        out.append(tuple(_finite(v, f"edge point {index}") for v in point))  # type: ignore[misc]
+    return out  # type: ignore[return-value]
+
+
+def edge_at(point: Tuple[float, float, float]) -> str:
+    """FeatureScript query for the solid-body edges through one point (millimetres)."""
+    x, y, z = point
+    return f"qContainsPoint(qBodyType(qEverything(EntityType.EDGE), BodyType.SOLID), vector({x:g}, {y:g}, {z:g}) * millimeter)"
+
+
+def edges_query(points: List[Tuple[float, float, float]]) -> Dict[str, Any]:
+    return {
+        "btType": "BTMParameterQueryList-148",
+        "parameterId": "entities",
+        "queries": [{"btType": "BTMIndividualQuery-138", "queryString": "query=qUnion([" + ", ".join(edge_at(p) for p in points) + "]);"}],
+    }
+
+
+def fillet_feature(spec: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "btType": "BTMFeature-134",
+        "featureType": "fillet",
+        "name": _feature_name(spec, "Fillet"),
+        "parameters": [edges_query(edge_points(spec)), _quantity("radius", _positive(spec.get("radius_mm"), "radius_mm"))],
+        "returnAfterSubfeatures": False,
+        "suppressed": False,
+    }
+
+
+def chamfer_feature(spec: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "btType": "BTMFeature-134",
+        "featureType": "chamfer",
+        "name": _feature_name(spec, "Chamfer"),
+        "parameters": [
+            edges_query(edge_points(spec)),
+            _enum("chamferType", "EQUAL_OFFSETS", "ChamferType"),
+            _quantity("width", _positive(spec.get("distance_mm"), "distance_mm")),
+        ],
+        "returnAfterSubfeatures": False,
+        "suppressed": False,
+    }
+
+
+FEATURE_BUILDERS = {"sketch": sketch_feature, "extrude": extrude_feature, "fillet": fillet_feature, "chamfer": chamfer_feature}
+
+
+def count_script(query: str) -> str:
+    return f"function(context is Context, queries) {{ return size(evaluateQuery(context, {query})); }}"
+
+
+def fs_number(answer: Any) -> Optional[float]:
+    """The number a FeatureScript evaluation returned, or None when the answer is not one."""
+    result = answer.get("result") if isinstance(answer, dict) else None
+    if isinstance(result, dict):
+        value = result.get("value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def summarize_bodies(details: Any, with_faces: bool = False) -> Optional[List[Dict[str, Any]]]:
+    """Bodies from /bodydetails, or None when the answer has no body list (unknown, never empty)."""
+    bodies = details.get("bodies") if isinstance(details, dict) else None
+    if not isinstance(bodies, list):
+        return None
+    out = []
+    for body in bodies:
+        if not isinstance(body, dict):
+            continue
+        properties = body.get("properties") if isinstance(body.get("properties"), dict) else {}
+        faces = [f for f in (body.get("faces") or []) if isinstance(f, dict)]
+        entry: Dict[str, Any] = {
+            "body_id": body.get("id"),
+            "type": body.get("type"),
+            "name": properties.get("name") or body.get("name"),
+            "face_count": len(faces),
+        }
+        if with_faces:
+            entry["faces"] = [summarize_face(f) for f in faces]
+        out.append(entry)
+    return out
+
+
+def summarize_face(face: Dict[str, Any]) -> Dict[str, Any]:
+    surface = face.get("surface") if isinstance(face.get("surface"), dict) else {}
+    kind = surface.get("type")
+    entry: Dict[str, Any] = {"face_id": face.get("id"), "surface": kind, "area_m2": face.get("area")}
+    if kind == "PLANE":
+        entry["normal"] = surface.get("normal")
+        entry["origin_m"] = surface.get("origin")
+    elif kind == "CYLINDER":
+        entry["radius_m"] = surface.get("radius")
+        entry["axis"] = surface.get("axis")
+        entry["origin_m"] = surface.get("origin")
+    return entry
+
+
+def external_references(features_response: Any) -> Dict[str, Any]:
+    """References to other documents or tabs, as the feature list shows them: derived features
+    (importDerived) and parameters of a BTMParameterReference type. `present` is None when there
+    is no feature list to scan."""
+    features = features_response.get("features") if isinstance(features_response, dict) else None
+    if not isinstance(features, list):
+        return {"present": None, "found": [], "basis": "Onshape returned no feature list, so references are unknown."}
+    found = []
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        label = feature.get("name") or feature.get("featureId")
+        if feature.get("featureType") == "importDerived":
+            found.append({"feature": label, "kind": "derived"})
+            continue
+        if '"BTMParameterReference' in json.dumps(feature.get("parameters", [])):
+            found.append({"feature": label, "kind": "reference parameter"})
+    return {
+        "present": bool(found),
+        "found": found,
+        "basis": "Scanned this Part Studio's feature list for derived features and reference parameters. References "
+        "held in other tabs, or in FeatureScript code, are not seen.",
+    }
+
+
+def contents_snapshot(features_response: Any, details: Any) -> Dict[str, Any]:
+    inventory = feature_inventory(features_response) if isinstance(features_response, dict) else None
+    return {
+        "features": inventory,
+        "sketches": [f["name"] for f in inventory if f["type"] == "newSketch"] if inventory is not None else None,
+        "bodies": summarize_bodies(details),
+    }
+
+
+def integrity_compare(before: Dict[str, Any], after: Dict[str, Any], made: List[str]) -> Dict[str, Any]:
+    """`clean` only when both snapshots were read and after holds exactly before's features plus `made`
+    (feature ids). Bodies may change in count (an extrude makes one), so they are recorded, not compared,
+    except that a read with no body list makes the result not_checked."""
+    if before.get("features") is None or after.get("features") is None or before.get("bodies") is None or after.get("bodies") is None:
+        return {"result": "not_checked", "detail": "A feature or body list could not be read.", "before": before, "after": after}
+    before_ids = [f["feature_id"] for f in before["features"]]
+    after_ids = [f["feature_id"] for f in after["features"]]
+    expected = before_ids + list(made)
+    if after_ids == expected:
+        return {"result": "clean", "before": before, "after": after}
+    unexpected = [i for i in after_ids if i not in expected]
+    missing = [i for i in expected if i not in after_ids]
+    return {
+        "result": "foreign",
+        "unexpected_features": unexpected,
+        "missing_features": missing,
+        "detail": "The feature list after the step is not the list before plus what this step made.",
+        "before": before,
+        "after": after,
+    }
+
+
+def multipart_body(fields: Dict[str, str], file_field: str, file_name: str, content: bytes) -> Tuple[bytes, str]:
+    boundary = "----onshape-bridge-" + secrets.token_hex(12)
+    parts: List[bytes] = []
+    for key, value in fields.items():
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+    safe_name = re.sub(r'[^A-Za-z0-9._-]', "_", file_name)
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; filename="{safe_name}"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n".encode("utf-8")
+    )
+    parts.append(content)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
 def summarize_mass(mass_response: Any) -> Dict[str, Any]:
@@ -1025,6 +1383,302 @@ def build_server(client_factory: Callable[[], OnshapeClient], protected: Protect
             body={"documentId": args["document_id"], "workspaceId": args["workspace_id"], "name": args["name"]},
         ) or {}
         return {"version_id": result.get("id"), "name": result.get("name"), "microversion": result.get("microversion")}
+
+    # -------------------------------------------------------------- new documents, STEP import, building
+
+    def require_name(did: str, expected: str) -> None:
+        document = client().request("GET", f"/documents/{did}") or {}
+        if document.get("name") != expected:
+            raise ToolError(f"Refused: document {did} is named {document.get('name')!r}, not {expected!r}. Nothing was written.")
+
+    def part_studios(did: str, wid: str) -> List[Dict[str, Any]]:
+        elements = client().request("GET", f"/documents/d/{did}/w/{wid}/elements") or []
+        return [e for e in elements if isinstance(e, dict) and e.get("elementType") == "PARTSTUDIO"]
+
+    def snapshot(did: str, wvm: str, wvmid: str, eid: str) -> Tuple[Dict[str, Any], Any]:
+        base = f"/partstudios/d/{did}/{wvm}/{wvmid}/e/{eid}"
+        features_response = client().request("GET", base + "/features")
+        try:
+            details = client().request("GET", base + "/bodydetails")
+        except ToolError as err:
+            log(f"bodydetails failed: {err}")
+            details = None
+        return contents_snapshot(features_response, details), features_response
+
+    def new_document(name: str, kind: str, extra: Dict[str, Any]) -> Tuple[str, str]:
+        protected.require_readable()
+        created = client().request("POST", "/documents", body={"name": name, "isPublic": False}) or {}
+        did = created.get("id")
+        wid = (created.get("defaultWorkspace") or {}).get("id")
+        if not did or not wid:
+            raise ToolError("Onshape did not return the new document's id and workspace. Nothing will be written to it.")
+        if did in protected.entries or did in protected.copies:
+            raise ToolError(f"Onshape returned document {did}, which the bridge already knows. Stopping: nothing will be written.")
+        protected.register_copy(
+            did, {"workspace_id": wid, "name": name, "kind": kind, "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(), **extra}
+        )
+        return did, wid
+
+    @server.tool(
+        "onshape_create_document",
+        "Create a NEW, private document for an estimating model built from a drawing or text (rfq-to-quote paths "
+        "C2 and A), and register it as a document the bridge may write. Checks that its one Part Studio is empty. "
+        "Name it <inquiry>_L<line>_<part>_R<rev>." + UNVERIFIED,
+        {"name": {"type": "string", "minLength": 1}},
+        ["name"],
+        read_only=False,
+    )
+    def create_document(args: Dict[str, Any]) -> Dict[str, Any]:
+        did, wid = new_document(args["name"], "created", {})
+        studios = part_studios(did, wid)
+        if len(studios) != 1:
+            protected.retire_copy(did, f"a new document held {len(studios)} Part Studios, not one")
+            raise ToolError(f"The new document {did} holds {len(studios)} Part Studios, not one. The bridge will not build in it.")
+        eid = studios[0].get("id")
+        contents, _ = snapshot(did, "w", wid, eid)
+        if contents["features"] is None or contents["features"] or contents["bodies"] is None or contents["bodies"]:
+            protected.retire_copy(did, "a new document was not empty, or its contents could not be read")
+            raise ToolError(
+                f"The new document {did} is not empty, or its contents could not be read: {json.dumps(contents)}. "
+                "The bridge will not build in it."
+            )
+        protected.copies[did]["part_studio_id"] = eid
+        protected._save()
+        return {"document_id": did, "workspace_id": wid, "element_id": eid, "name": args["name"], "contents": contents}
+
+    @server.tool(
+        "onshape_list_contents",
+        "List a Part Studio's features (sketches are type newSketch), bodies, and the external references its feature "
+        "list shows. Read-only. Call before and after every build or adapt step: the integrity check." + UNVERIFIED,
+        {"document_id": ID, "wvm": WVM, "wvm_id": ID, "element_id": ID},
+        ["document_id", "wvm", "wvm_id", "element_id"],
+    )
+    def list_contents(args: Dict[str, Any]) -> Dict[str, Any]:
+        contents, features_response = snapshot(args["document_id"], args["wvm"], args["wvm_id"], args["element_id"])
+        return {**contents, "external_references": external_references(features_response), "integrity_note": INTEGRITY_NOTE}
+
+    @server.tool(
+        "onshape_read_faces",
+        "Bodies and faces of a Part Studio: each face's surface type, area, and for planes the normal, for cylinders the "
+        "radius and axis (metres). For an imported STEP model, holes and pockets are read from these faces: each one "
+        "is a reading to confirm, not a feature. Read-only." + UNVERIFIED,
+        {"document_id": ID, "wvm": WVM, "wvm_id": ID, "element_id": ID},
+        ["document_id", "wvm", "wvm_id", "element_id"],
+    )
+    def read_faces(args: Dict[str, Any]) -> Dict[str, Any]:
+        details = client().request("GET", "/partstudios" + wvm_path(args) + "/bodydetails")
+        bodies = summarize_bodies(details, with_faces=True)
+        if bodies is None:
+            raise ToolError("Onshape returned no body list, so the faces could not be read.")
+        return {"bodies": bodies, "units": "metres, square metres"}
+
+    @server.tool(
+        "onshape_add_feature",
+        "Add one feature to a Part Studio in a document this bridge made or copied: kind sketch (spec: plane Top, "
+        "Front or Right; entities of type rectangle {x1,y1,x2,y2}, circle {cx,cy,radius} or line {x1,y1,x2,y2}, in mm), "
+        "extrude (spec: sketch_feature_id, operation NEW, ADD or REMOVE for a cut or through hole, end BLIND with "
+        "depth_mm or THROUGH_ALL, opposite_direction), fillet (spec: edge_points_mm, one [x,y,z] on each edge, "
+        "radius_mm) or chamfer (spec: edge_points_mm, distance_mm). Checks the spec and, for fillet and chamfer, that "
+        "each point is on exactly one edge, before writing. After writing, the feature must regenerate, a fillet or "
+        "chamfer must make a face per edge, and the feature list must be the old one plus this feature; otherwise the "
+        "feature is deleted again. Returns the integrity result." + UNVERIFIED,
+        {
+            "document_id": ID,
+            "workspace_id": ID,
+            "element_id": ID,
+            "expected_document_name": {"type": "string", "minLength": 1},
+            "kind": {"type": "string", "enum": sorted(FEATURE_BUILDERS)},
+            "spec": {"type": "object"},
+        },
+        ["document_id", "workspace_id", "element_id", "expected_document_name", "kind", "spec"],
+        read_only=False,
+    )
+    def add_feature(args: Dict[str, Any]) -> Dict[str, Any]:
+        did, wid, eid, kind = args["document_id"], args["workspace_id"], args["element_id"], args["kind"]
+        protected.check_writable(did, wid)
+        require_name(did, args["expected_document_name"])
+        if kind not in FEATURE_BUILDERS or not isinstance(args["spec"], dict):
+            raise ToolError("kind must be sketch, extrude, fillet or chamfer, with a spec object. Nothing was written.")
+        feature = FEATURE_BUILDERS[kind](args["spec"])  # validates the whole spec before any call
+        base = f"/partstudios/d/{did}/w/{wid}/e/{eid}"
+        before, before_response = snapshot(did, "w", wid, eid)
+        if before["features"] is None:
+            raise ToolError("Onshape returned no feature list for this Part Studio, so the bridge cannot check the step. Nothing was written.")
+        if kind == "extrude":
+            sketch_id = args["spec"]["sketch_feature_id"]
+            if not any(f["feature_id"] == sketch_id and f["type"] == "newSketch" for f in before["features"]):
+                raise ToolError(f"No sketch with feature id {sketch_id} in this Part Studio. Nothing was written.")
+        points: List[Tuple[float, float, float]] = []
+        if kind in ("fillet", "chamfer"):
+            points = edge_points(args["spec"])
+            problems = []
+            for point in points:
+                answer = client().request("POST", base + "/featurescript", body={"script": count_script(edge_at(point)), "queries": []})
+                count = fs_number(answer)
+                if count != 1:
+                    problems.append(f"{list(point)}: {'unknown' if count is None else int(count)} edges")
+            if problems:
+                raise ToolError(
+                    "Each edge point must lie on exactly one solid edge, so the right edges take the "
+                    f"{kind}: {'; '.join(problems)}. Nothing was written."
+                )
+
+        answer = client().request(
+            "POST",
+            base + "/features",
+            body={
+                "btType": "BTFeatureDefinitionCall-1406",
+                "feature": feature,
+                "serializationVersion": (before_response or {}).get("serializationVersion"),
+                "sourceMicroversion": (before_response or {}).get("sourceMicroversion"),
+            },
+        ) or {}
+        feature_id = (answer.get("feature") or {}).get("featureId") if isinstance(answer, dict) else None
+        status = (answer.get("featureState") or {}).get("featureStatus") if isinstance(answer, dict) else None
+
+        def roll_back(reason: str) -> None:
+            undo_note = "The feature was deleted again, so the Part Studio is as it was before this call."
+            try:
+                if not feature_id:
+                    raise ToolError("Onshape returned no feature id to delete")
+                client().request("DELETE", f"{base}/features/featureid/{feature_id}")
+                again, _ = snapshot(did, "w", wid, eid)
+                if again["features"] != before["features"]:
+                    raise ToolError("the feature list after deleting it differs from the list before")
+            except ToolError as err:
+                protected.retire_copy(did, f"a {kind} failed and could not be removed")
+                raise ToolError(
+                    f"{reason} Removing it did not succeed ({err}), so this document is in an unknown state and the bridge "
+                    "will not write to it again. Make a new one."
+                ) from err
+            raise ToolError(f"{reason} {undo_note}")
+
+        if status not in GOOD_STATUSES:
+            roll_back(f"The {kind} did not regenerate (status {status!r}).")
+        made_faces = None
+        if points:
+            made_faces = fs_number(
+                client().request(
+                    "POST",
+                    base + "/featurescript",
+                    body={"script": count_script(f'qCreatedBy(makeId("{feature_id}"), EntityType.FACE)'), "queries": []},
+                )
+            )
+            if made_faces is None or made_faces < len(points):
+                roll_back(
+                    f"The {kind} made {'an unknown number of' if made_faces is None else int(made_faces)} face(s) for "
+                    f"{len(points)} edge(s), so not every edge took it."
+                )
+        after, after_response = snapshot(did, "w", wid, eid)
+        health = feature_health(after_response)
+        if health["regenerated"] is not True:
+            roll_back("After the change, the Part Studio did not regenerate cleanly, or its health is unknown.")
+        integrity = integrity_compare(before, after, [feature_id])
+        if integrity["result"] == "foreign":
+            protected.retire_copy(did, "unexpected features appeared during a build step")
+            raise ToolError(
+                "The feature list after this step holds features this step did not make. The step fails; the bridge will "
+                f"not write to this document again. {json.dumps({k: integrity[k] for k in ('unexpected_features', 'missing_features')})}"
+            )
+        return {
+            "feature_id": feature_id,
+            "name": feature["name"],
+            "status": status,
+            "faces_made": made_faces,
+            "health": health,
+            "document_integrity": integrity,
+        }
+
+    @server.tool(
+        "onshape_import_step",
+        "Import a customer's STEP file (rfq-to-quote path C1) into a NEW private document, as a Part Studio, and "
+        "register the document as one the bridge may write. The file must be on the machine running the bridge. "
+        "Polls the translation for up to about two minutes; if it is still running, call onshape_import_status. "
+        "Nothing is built on the imported bodies: read them with onshape_read_faces." + UNVERIFIED,
+        {"file_path": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}},
+        ["file_path", "name"],
+        read_only=False,
+    )
+    def import_step(args: Dict[str, Any]) -> Dict[str, Any]:
+        source = Path(args["file_path"])
+        if source.suffix.lower() not in (".step", ".stp"):
+            raise ToolError("file_path must be a .step or .stp file. Nothing was imported.")
+        if not source.is_file():
+            raise ToolError(f"No file at {source}. Nothing was imported.")
+        size = source.stat().st_size
+        if size == 0 or size > MAX_IMPORT_BYTES:
+            raise ToolError(f"The file is {size} bytes; the bridge imports files from 1 byte to {MAX_IMPORT_BYTES} bytes. Nothing was imported.")
+        content = source.read_bytes()
+        did, wid = new_document(args["name"], "imported", {"source_file": str(source), "source_sha256": hashlib.sha256(content).hexdigest()})
+        start_ids = {e.get("id") for e in part_studios(did, wid)}
+        protected.copies[did]["preexisting_part_studios"] = sorted(i for i in start_ids if i)
+        raw = multipart_body(
+            {"translate": "true", "flattenAssemblies": "true", "storeInDocument": "true"},
+            "file",
+            source.name,
+            content,
+        )
+        try:
+            started = client().request("POST", f"/translations/d/{did}/w/{wid}", raw=raw) or {}
+        except ToolError:
+            protected.retire_copy(did, "the STEP upload failed")
+            raise
+        translation_id = started.get("id") if isinstance(started, dict) else None
+        if not translation_id:
+            protected.retire_copy(did, "the STEP import did not start")
+            raise ToolError("Onshape did not start the translation (no translation id). The new document will not be used.")
+        protected.copies[did]["translation_id"] = translation_id
+        protected._save()
+        return poll_import(did, polls=40)
+
+    def poll_import(did: str, polls: int) -> Dict[str, Any]:
+        record = protected.copies.get(did)
+        if not record or record.get("kind") != "imported" or not record.get("translation_id"):
+            raise ToolError(f"Document {did} is not a STEP import this bridge started.")
+        if record.get("retired"):
+            raise ToolError(f"The import into {did} was abandoned ({record['retired']}).")
+        state_now: Dict[str, Any] = {}
+        for attempt in range(polls):
+            state_now = client().request("GET", f"/translations/{record['translation_id']}") or {}
+            if state_now.get("requestState") in ("DONE", "FAILED"):
+                break
+            if attempt < polls - 1:
+                client().sleep(3)
+        request_state = state_now.get("requestState")
+        if request_state == "FAILED":
+            protected.retire_copy(did, "the STEP import failed")
+            raise ToolError(f"Onshape could not import the STEP file: {state_now.get('failureReason')}. Fall back to reading the file as text, unverified.")
+        if request_state != "DONE":
+            return {"document_id": did, "state": request_state or "unknown", "next": "Still translating: call onshape_import_status."}
+        wid = record["workspace_id"]
+        before = set(record.get("preexisting_part_studios") or [])
+        result_ids = set(state_now.get("resultElementIds") or [])
+        studios = [e for e in part_studios(did, wid) if e.get("id") not in before or e.get("id") in result_ids]
+        if len(studios) != 1:
+            protected.retire_copy(did, f"the import made {len(studios)} Part Studios, not one")
+            raise ToolError(
+                f"The import finished but made {len(studios)} Part Studios, not one, so the bridge cannot tell which holds "
+                "the customer's bodies. Fall back to reading the file as text, unverified."
+            )
+        eid = studios[0].get("id")
+        record["part_studio_id"] = eid
+        protected._save()
+        details = client().request("GET", f"/partstudios/d/{did}/w/{wid}/e/{eid}/bodydetails")
+        bodies = summarize_bodies(details)
+        if not bodies:
+            raise ToolError("The import finished but Onshape lists no bodies in the new Part Studio. Treat the import as failed.")
+        return {"document_id": did, "workspace_id": wid, "element_id": eid, "state": "DONE", "bodies": bodies,
+                "origin": "customer_step", "next": "Read faces with onshape_read_faces; build nothing on these bodies."}
+
+    @server.tool(
+        "onshape_import_status",
+        "Check a STEP import that onshape_import_step left translating, and finish it when Onshape is done." + UNVERIFIED,
+        {"document_id": ID},
+        ["document_id"],
+        read_only=False,
+    )
+    def import_status(args: Dict[str, Any]) -> Dict[str, Any]:
+        return poll_import(args["document_id"], polls=1)
 
     return server
 

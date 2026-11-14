@@ -28,17 +28,23 @@ python3 -I -m unittest discover -s tools/cad-variants/tests
   and enums were checked against a mirror of the SOLIDWORKS API Help; Onshape
   endpoints against Onshape's API documentation and its generated Go client.
   Neither bridge has talked to a live SOLIDWORKS session or Onshape account.
-- **Not built:** creating models from drawings or text (path C2/A), STEP import
-  (C1) and CAM. Both editions fall back to the hand-entered feature list and the
-  feature path, which upstream already defines, and say so.
+- **Built, unverified:** creating models from drawings or text (path C2/A: sketch,
+  extrude, cut, fillet, chamfer), STEP import (C1), and listing bodies and external
+  references for the integrity check. Each build step is checked and undone on
+  failure; the SOLIDWORKS default part template enum (8) is not confirmed.
+- **Not built:** CAM. Neither SOLIDWORKS CAM nor Onshape CAM Studio has a published
+  API, so both editions use the feature path, which upstream already defines, and
+  say so. Threads, lofts and sheet metal are hand-entered beside the model.
 
 ## First live run
 
 SOLIDWORKS: on Windows with SOLIDWORKS open on a throwaway part, `pip install pywin32`,
 start Claude with `--plugin-dir plugins/manufacturing-solidworks`, and ask for
 `sw_status`, then `sw_read_parameters`, then a two-variant sweep into a scratch folder.
+Then `sw_new_part` in a scratch folder and one sketch and extrude with `sw_add_feature`.
 
 Onshape: make a read-only API key first, set `ONSHAPE_ACCESS_KEY` and
 `ONSHAPE_SECRET_KEY`, and read a public or scratch Part Studio (`onshape_status`,
 `onshape_read_parameters`, `onshape_read_properties`). Only then a read-write key
-and a copied-document sweep. Each call counts against the plan's annual API limit.
+and a copied-document sweep, then `onshape_create_document` with one sketch and
+extrude. Each call counts against the plan's annual API limit.

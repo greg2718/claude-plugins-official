@@ -1,7 +1,7 @@
 {
   "name": "manufacturing-onshape",
   "displayName": "Manufacturing (Onshape edition)",
-  "version": "1.0.0-onshape.2",
+  "version": "1.0.0-onshape.3",
   "description": "The manufacturing plugin. Skills for the work a plant actually runs on: joining the exports and systems into one dataset, quoting make-to-order jobs from drawings, writing nonconformances and 8Ds, diagnosing breakdowns, and reporting the morning numbers. Works with Microsoft 365, Oracle NetSuite, Infor M3 and Onshape once connected, connects anything else through custom-connector, and runs on scheduled file exports when a system has no connector at all. Install and then ask Claude to help you get onboarded. This is a community edition of Anthropic's claude-for-manufacturing for Onshape, through a bundled bridge that has not yet been run against a live Onshape account.",
   "author": {
     "name": "greg2718 (fork of Anthropic's claude-for-manufacturing)"

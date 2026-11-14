@@ -189,8 +189,9 @@ an analysis tool or a person to evaluate and return results into, which
 - **The parameter combination count explodes** — five parameters at five
   values is 3,125. Always show the count and confirm before generating.
 - **The model has external references or in-context relationships** —
-  variant generation can break them. This edition's bridge cannot detect
-  them yet: say they were not checked, and ask, before generating.
+  variant generation can break them. Detect them with `onshape_list_contents` and warn
+  before generating. Where the bridge cannot tell, say they were not checked,
+  and ask.
 - **CAD operations are slow** — this is a long-running batch, not a single
   blocking call. Design for progress reporting, not silence until it
   finishes.
