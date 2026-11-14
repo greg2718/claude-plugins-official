@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "onshape": {
+      "type": "stdio",
+      "command": "${ONSHAPE_BRIDGE_PYTHON:-python3}",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/servers/onshape_bridge.py"
+      ],
+      "env": {
+        "ONSHAPE_ACCESS_KEY": "${ONSHAPE_ACCESS_KEY:-}",
+        "ONSHAPE_SECRET_KEY": "${ONSHAPE_SECRET_KEY:-}",
+        "ONSHAPE_BASE_URL": "${ONSHAPE_BASE_URL:-https://cad.onshape.com}"
+      }
+    }
+  }
+}

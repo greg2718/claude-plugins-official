@@ -1,0 +1,16 @@
+This plugin is a modified version of "Claude for Manufacturing"
+(plugins/claude-for-manufacturing in https://github.com/anthropics/claude-plugins-official),
+Copyright Anthropic, licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Changes from the upstream plugin:
+- Autodesk Fusion, the upstream plugin's one CAD connector, is replaced by a different
+  CAD system (SOLIDWORKS or Onshape, per edition) through a bridge in servers/.
+- Text in the skills that named Fusion is changed to the edition's CAD system, and
+  steps the bridge cannot do yet (building models from drawings, STEP import, CAM)
+  are marked as not available, with the hand-entered fallback the upstream plugin
+  already defines.
+- The changes are made by tools/cad-variants/build.py in the fork that carries this folder.
+
+This edition is not published, endorsed or maintained by Anthropic, Dassault Systèmes or PTC.
+SOLIDWORKS is a trademark of Dassault Systèmes. Onshape is a trademark of PTC Inc.
+Autodesk Fusion is a trademark of Autodesk, Inc.

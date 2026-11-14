@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "solidworks": {
+      "type": "stdio",
+      "command": "${SOLIDWORKS_BRIDGE_PYTHON:-python}",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/servers/solidworks_bridge.py"
+      ]
+    }
+  }
+}

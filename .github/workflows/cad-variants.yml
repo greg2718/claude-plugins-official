@@ -1,0 +1,32 @@
+name: CAD editions
+
+# Rebuilds the SOLIDWORKS and Onshape editions of claude-for-manufacturing and
+# fails if the committed copies are stale, then runs the bridge tests.
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/claude-for-manufacturing/**'
+      - 'plugins/manufacturing-*/**'
+      - 'tools/cad-variants/**'
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/claude-for-manufacturing/**'
+      - 'plugins/manufacturing-*/**'
+      - 'tools/cad-variants/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 tools/cad-variants/build.py --check
+      - run: python3 -I -m unittest discover -s tools/cad-variants/tests -v
