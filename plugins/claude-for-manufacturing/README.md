@@ -30,10 +30,11 @@ the designed path, not a fallback — a folder of CSVs runs them. Connectors mak
 it fresher, never mandatory.
 
 The exception is `design-space-explore`, which generates CAD variants and so
-needs a live CAD connection: **Autodesk Fusion on the desktop**, or a CAD
-system connected through `custom-connector`. There is no fallback — no MCP
-exists for SolidWorks, Creo, NX or Inventor, so a shop running one of those has
-no path to that one skill. Its partner
+needs a live CAD connection: **Autodesk Fusion on the desktop** in this plugin,
+**SOLIDWORKS** or **Onshape** through their editions of it (see
+[CAD editions](#cad-editions)), or a CAD system connected through
+`custom-connector`. A shop running Creo, NX or Inventor has no path to that one
+skill yet. Its partner
 `trade-study-report` is unaffected: it reads a variant manifest a person can
 fill in by hand.
 
@@ -55,6 +56,25 @@ is already set — but it still needs one action from you before it will connect
 | System | What to do |
 |---|---|
 | **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |
+
+### CAD editions
+
+The same plugin comes in three editions, one per CAD system. The skills are the
+same; only the CAD connection differs. Install the one your shop runs.
+
+| CAD system | Edition | How it connects |
+|---|---|---|
+| **Autodesk Fusion** | This plugin, `claude-for-manufacturing` | Fusion's own MCP server, in the desktop app |
+| **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |
+| **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |
+
+The SOLIDWORKS and Onshape editions vary existing models (`design-space-explore`,
+and adapting a prior part in `rfq-to-quote`). They do not yet build a model
+from a drawing, import a STEP file or derive CAM hours: those steps fall back to
+the hand-entered feature list and the feature path, and say so. Neither bridge
+has been run against a live SOLIDWORKS session or Onshape account yet. Both
+editions are generated from `claude-for-manufacturing` by `tools/cad-variants/build.py`
+at the root of this repository.
 
 ### Running the morning report automatically
 
@@ -314,7 +334,8 @@ store), which is precisely why it is safe to run unattended overnight.
 
 It works with four connectors once connected: Microsoft 365 for documents, mail and the export
 landing folder; Oracle NetSuite or Infor M3 for the ERP records; Autodesk
-Fusion for CAD and CAM. [Getting started](#getting-started) has what each one needs.
+Fusion for CAD and CAM, or SOLIDWORKS or Onshape for CAD in their
+[editions](#cad-editions). [Getting started](#getting-started) has what each one needs.
 
 Microsoft 365, NetSuite and Infor M3 are connectors you enable in Claude, so
 the plugin declares none of them — NetSuite's and M3's addresses are specific

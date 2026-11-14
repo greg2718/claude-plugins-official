@@ -35,7 +35,12 @@ HERE = Path(__file__).resolve().parent
 UPSTREAM = ROOT / "plugins" / "claude-for-manufacturing"
 # Lines that may name Fusion: they credit the upstream edition or list it as another system.
 ALLOWED_FUSION_LINES = {
-    "README.md": ["with Autodesk Fusion replaced by", "only where they named Fusion"],
+    "README.md": [
+        "with Autodesk Fusion replaced by",
+        "only where they named Fusion",
+        "edition**. Autodesk Fusion and",
+        "| **Autodesk Fusion** | [`claude-for-manufacturing`]",
+    ],
     "NOTICE": [""],
     "skills/design-space-explore/reference/cad-adapter.md": ["Fusion and", "unlike Fusion", "the Fusion add-in"],
     "skills/custom-connector/reference/known-systems.md": ["| Autodesk Fusion | 1 — vendor MCP, added via custom-connector |"],
@@ -102,6 +107,7 @@ def not_built(e: Edition) -> str:
 
 def readme_edits(e: Edition) -> List[Tuple[str, str]]:
     N, k = e.name, e.key
+    other = "Onshape" if k == "solidworks" else "SOLIDWORKS"
     if k == "solidworks":
         setup_row = ("| **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later "
                      "and run `pip install pywin32`. The plugin starts the bridge itself. If the Python launcher is "
@@ -127,8 +133,8 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
          "Provided AS IS, without warranty, like the upstream plugin (see `NOTICE`)."),
         ("1. Install **Claude for Manufacturing** from the Claude plugin directory.",
          f"1. Install this folder as a plugin (`claude --plugin-dir plugins/{e.plugin}` from a checkout)."),
-        ("needs a live CAD connection: **Autodesk Fusion on the desktop**, or a CAD\nsystem connected through `custom-connector`. There is no fallback — no MCP\nexists for SolidWorks, Creo, NX or Inventor, so a shop running one of those has\nno path to that one skill. Its partner",
-         f"needs a live CAD connection: **{N}, through the bridge bundled with this\nedition**. A shop on another CAD system uses the upstream plugin or another\nedition. Its partner"),
+        ("needs a live CAD connection: **Autodesk Fusion on the desktop** in this plugin,\n**SOLIDWORKS** or **Onshape** through their editions of it (see\n[CAD editions](#cad-editions)), or a CAD system connected through\n`custom-connector`. A shop running Creo, NX or Inventor has no path to that one\nskill yet. Its partner",
+         f"needs a live CAD connection: **{N}, through the bridge bundled with this\nedition**. Autodesk Fusion and {other} have editions of their own (see\n[CAD editions](#cad-editions)). Its partner"),
         ("Only Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address\nis already set — but it still needs one action from you before it will connect:",
          f"Only {N} is declared in this plugin's `.mcp.json`, as its bundled bridge — but\nit still needs one action from you before it will connect:"),
         ("| **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |",
@@ -148,8 +154,10 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
          f"`design-space-explore` generates a batch of CAD variants in {N}\nby applying changed parameters to the model you already have\n{'open' if k == 'solidworks' else 'in Onshape'}"),
         ("| RFQ to quote | customer-inquiry-intake → data-consolidate → design step in Fusion → quote-build, four gates |",
          f"| RFQ to quote | customer-inquiry-intake → data-consolidate → design step in {N} → quote-build, four gates |"),
-        ("Oracle NetSuite or Infor M3 for the ERP records; Autodesk\nFusion for CAD and CAM.",
+        ("Oracle NetSuite or Infor M3 for the ERP records; Autodesk\nFusion for CAD and CAM, or SOLIDWORKS or Onshape for CAD in their\n[editions](#cad-editions).",
          f"Oracle NetSuite or Infor M3 for the ERP records; {N}\nfor CAD."),
+        ("The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. Install the one your shop runs.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | This plugin, `claude-for-manufacturing` | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nThe SOLIDWORKS and Onshape editions vary",
+         f"The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. This is the {N} edition.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | [`claude-for-manufacturing`](../claude-for-manufacturing), Anthropic's original | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | {'This plugin, ' if k == 'solidworks' else ''}[`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | {'This plugin, ' if k == 'onshape' else ''}[`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nThe SOLIDWORKS and Onshape editions vary"),
         ("(`shared/erp-connectors.md`). Fusion is declared in `.mcp.json` at a local address,\nbecause its MCP server runs inside the desktop app on your machine rather than\nin the cloud.",
          f"(`shared/erp-connectors.md`). {declared}"),
     ]

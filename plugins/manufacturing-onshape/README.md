@@ -36,8 +36,8 @@ it fresher, never mandatory.
 
 The exception is `design-space-explore`, which generates CAD variants and so
 needs a live CAD connection: **Onshape, through the bridge bundled with this
-edition**. A shop on another CAD system uses the upstream plugin or another
-edition. Its partner
+edition**. Autodesk Fusion and SOLIDWORKS have editions of their own (see
+[CAD editions](#cad-editions)). Its partner
 `trade-study-report` is unaffected: it reads a variant manifest a person can
 fill in by hand.
 
@@ -59,6 +59,25 @@ it still needs one action from you before it will connect:
 | System | What to do |
 |---|---|
 | **Onshape** | Create an API key in Onshape (*My Account → Developer*, or *Company Settings → Developer* on Enterprise). Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from — never in the conversation. An Enterprise stack also sets `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; set `ONSHAPE_BRIDGE_PYTHON` if the launcher is not `python3`. A read-only key is enough for configuration-based variants |
+
+### CAD editions
+
+The same plugin comes in three editions, one per CAD system. The skills are the
+same; only the CAD connection differs. This is the Onshape edition.
+
+| CAD system | Edition | How it connects |
+|---|---|---|
+| **Autodesk Fusion** | [`claude-for-manufacturing`](../claude-for-manufacturing), Anthropic's original | Fusion's own MCP server, in the desktop app |
+| **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |
+| **Onshape** | This plugin, [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |
+
+The SOLIDWORKS and Onshape editions vary existing models (`design-space-explore`,
+and adapting a prior part in `rfq-to-quote`). They do not yet build a model
+from a drawing, import a STEP file or derive CAM hours: those steps fall back to
+the hand-entered feature list and the feature path, and say so. Neither bridge
+has been run against a live SOLIDWORKS session or Onshape account yet. Both
+editions are generated from `claude-for-manufacturing` by `tools/cad-variants/build.py`
+at the root of this repository.
 
 ### Running the morning report automatically
 
