@@ -426,7 +426,7 @@ class OnshapeGuardTests(unittest.TestCase):
     def test_failed_write_part_way_is_undone_with_a_journal(self):
         self.make_copy()
         self.fake.routes[("POST", "/partstudios/d/copy/w/wc/e/ec/features/featureid/v1")] = {"sourceMicroversion": "mc2"}
-        self.fake.routes[("POST", "/partstudios/d/copy/w/wc/e/ec/features/featureid/v2")] = (500, {"message": "boom"})
+        self.fake.routes[("POST", "/partstudios/d/copy/w/wc/e/ec/features/featureid/v2")] = (409, {"message": "boom"})
         value, is_error = call(self.server, "onshape_set_variables", self.set_args(assignments={"wall": "4 mm", "rib": "#wall * 3"}))
         self.assertTrue(is_error)
         self.assertIn("were undone", value["error"])
@@ -438,7 +438,7 @@ class OnshapeGuardTests(unittest.TestCase):
 
     def test_failed_undo_retires_the_copy(self):
         self.make_copy()
-        self.fake.routes[("POST", "/partstudios/d/copy/w/wc/e/ec/features/featureid/v2")] = (500, {})
+        self.fake.routes[("POST", "/partstudios/d/copy/w/wc/e/ec/features/featureid/v2")] = (409, {})
         answers = {"n": 0}
         original = self.fake.__call__
 
@@ -446,7 +446,7 @@ class OnshapeGuardTests(unittest.TestCase):
             if url.split("?")[0].endswith("/featureid/v1") and method == "POST":
                 answers["n"] += 1
                 if answers["n"] > 1:
-                    return 500, {}, b"{}"
+                    return 409, {}, b"{}"
             return original(method, url, headers, body)
 
         server = osb.build_server(lambda: osb.OnshapeClient("a", "s", transport=flaky), osb.ProtectedDocuments(self.state))
@@ -547,6 +547,8 @@ class FakeSession:
         self.rebuild_ok = True
         self.feature_failures = []
         self.refuse = {}
+        self.refuse_values = {}
+        self.original = {d["name"]: d["value_si"] for d in self.dims}
         self.fail_undo = False
         # Building: a stateful feature tree and body list.
         self.features = [{"name": "Boss-Extrude1", "type": "Extrusion"}, {"name": "Sketch1", "type": "ProfileFeature"}]
@@ -589,11 +591,14 @@ class FakeSession:
     def set_dimension(self, doc, name, value):
         if name in self.refuse:
             return self.refuse[name]
+        if (name, value) in self.refuse_values:  # a status, not an exception, and nothing changes
+            return self.refuse_values[(name, value)]
         for dim in self.dims:
             if dim["name"] == name:
-                if self.fail_undo and value == dim["value_si"]:
+                if self.fail_undo and value == self.original[name]:
                     raise RuntimeError("COM call failed")
                 self.sets.append((doc.path, name, value))
+                dim["value_si"] = value
         return "Successful"
 
     def find_global(self, doc, name):
@@ -1164,7 +1169,7 @@ class FakeStudio:
                 return ok({"feature": {"featureId": feature["featureId"]}, "featureState": {"featureStatus": self.status}})
             if method == "DELETE" and tail[:2] == ["features", "featureid"]:
                 if self.fail_delete:
-                    return 500, {}, b"{}"
+                    return 409, {}, b"{}"
                 studio["features"] = [f for f in studio["features"] if f["featureId"] != tail[2]]
                 return ok({})
             if method == "POST" and tail == ["featurescript"]:

@@ -141,7 +141,7 @@ specification for your IT.
 
 | | |
 |---|---|
-| Version | 1.0.0 (upstream), onshape edition 3 |
+| Version | 1.0.0 (upstream), onshape edition 4 |
 | Skills | 17 — 12 atomic, 5 chains |
 | Contracts | 11 — handoffs between skills, and the records the dashboards and the plant setup keep |
 | Connectors | 1 declared in `.mcp.json` — Onshape, through the bundled bridge. Also works with Microsoft 365, Oracle NetSuite and Infor M3 once you connect them in Claude |

@@ -21,6 +21,7 @@ says so in its description until it has been.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import json
@@ -28,12 +29,12 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp_stdio import Server, ToolError, log  # noqa: E402
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 UNVERIFIED = " (Not yet run against a live SOLIDWORKS session.)"
 
 # Enum values, from the SOLIDWORKS API Help's swconst pages.
@@ -280,28 +281,39 @@ class StateLock:
             pass
 
 
-def write_json_atomically(path: Path, data: Any) -> None:
-    """Under the state lock, write to a temporary file in the same folder, flush it to disk, then
-    rename it over the target, so a crash leaves either the old file or the new one, never half of one."""
+def _write_json_unlocked(path: Path, data: Any) -> None:
+    """Write to a temporary file in the same folder, flush it to disk, then rename it over the
+    target, so a crash leaves either the old file or the new one, never half of one. The caller
+    holds the state lock."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def write_json_atomically(path: Path, data: Any) -> None:
     with StateLock(path):
-        try:
-            with temporary.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+        _write_json_unlocked(path, data)
 
 
 class ProtectedFiles:
     """What the bridge may and may not write, persisted so a restarted bridge keeps refusing.
 
     `protected`: base files read at the start of a run. Never written.
-    `copies`: files this bridge made with sw_save_copy_and_open. The only files it writes.
+    `copies`: files this bridge made. The only files it writes.
+
+    The file on disk is the record, and more than one bridge may be running. So every change
+    is one transaction under the state lock: read the file, change it, write it back. Every
+    write decision reads the file again first, so a bridge never acts on an older picture than
+    another bridge left. Retirements never go away: one this bridge knows of is kept even if
+    the file it reads does not have it yet.
 
     If the state file exists but cannot be read, nothing is written at all until a
     person fixes or removes it (fail closed): an empty list would silently drop
@@ -313,27 +325,43 @@ class ProtectedFiles:
         self.entries: Dict[str, Dict[str, Any]] = {}
         self.copies: Dict[str, Dict[str, Any]] = {}
         self.error: Optional[str] = None
-        if not path.exists():
+        self.refresh()
+
+    def _read(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        if not self.path.exists():
+            return {}, {}
+        data = json.loads(self.path.read_text("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("top level is not an object")
+        if data.get("format") == STATE_FORMAT:
+            protected, copies = data.get("protected"), data.get("copies")
+            if not isinstance(protected, dict) or not isinstance(copies, dict):
+                raise ValueError("protected and copies must be objects")
+        elif "format" not in data and all(isinstance(v, dict) and "sha256" in v for v in data.values()):
+            protected, copies = data, {}  # the first version's file: protected bases only
+        else:
+            raise ValueError("unrecognised layout")
+        for record in list(protected.values()) + list(copies.values()):
+            if not isinstance(record, dict):
+                raise ValueError("an entry is not an object")
+        return protected, copies
+
+    def refresh(self) -> None:
+        """Read the file again. Keeps every protection and retirement this bridge already knows."""
+        if self.error:
             return
         try:
-            data = json.loads(path.read_text("utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("top level is not an object")
-            if data.get("format") == STATE_FORMAT:
-                protected, copies = data.get("protected"), data.get("copies")
-                if not isinstance(protected, dict) or not isinstance(copies, dict):
-                    raise ValueError("protected and copies must be objects")
-            elif "format" not in data and all(isinstance(v, dict) and "sha256" in v for v in data.values()):
-                protected, copies = data, {}  # the first version's file: protected bases only
-            else:
-                raise ValueError("unrecognised layout")
-            for record in list(protected.values()) + list(copies.values()):
-                if not isinstance(record, dict):
-                    raise ValueError("an entry is not an object")
-            self.entries, self.copies = protected, copies
+            protected, copies = self._read()
         except (OSError, ValueError) as err:
-            self.error = f"The bridge's state file {path} cannot be read ({err})."
+            self.error = f"The bridge's state file {self.path} cannot be read ({err})."
             log(self.error + " Refusing every write until it is fixed or removed.")
+            return
+        for key, record in self.entries.items():
+            protected.setdefault(key, record)
+        for key, record in self.copies.items():
+            if record.get("retired") and key in copies and not copies[key].get("retired"):
+                copies[key]["retired"] = record["retired"]
+        self.entries, self.copies = protected, copies
 
     def _require_readable(self) -> None:
         if self.error:
@@ -342,44 +370,73 @@ class ProtectedFiles:
                 "a person checks it, then fixes or removes it. Nothing was changed."
             )
 
-    def _save(self) -> None:
-        write_json_atomically(self.path, {"format": STATE_FORMAT, "protected": self.entries, "copies": self.copies})
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Read, change and write the state as one step under the lock."""
+        self._require_readable()
+        with StateLock(self.path):
+            self.refresh()
+            self._require_readable()
+            yield
+            _write_json_unlocked(self.path, {"format": STATE_FORMAT, "protected": self.entries, "copies": self.copies})
 
     def add(self, file_path: str, record: Dict[str, Any]) -> None:
-        self._require_readable()
         key = normalise(file_path)
-        if key in self.copies:
-            raise ToolError(f"{file_path} is a copy this bridge made, not a base model.")
-        self.entries[key] = record
-        self._save()
+        with self.transaction():
+            if key in self.copies:
+                raise ToolError(f"{file_path} is a copy this bridge made, not a base model.")
+            self.entries[key] = record
 
     def register_copy(self, file_path: str, record: Dict[str, Any]) -> None:
-        self._require_readable()
         key = normalise(file_path)
-        if key in self.entries:
-            raise ToolError(f"Refused: {file_path} is a protected base path.")
-        self.copies[key] = record
-        self._save()
+        with self.transaction():
+            if key in self.entries:
+                raise ToolError(f"Refused: {file_path} is a protected base path.")
+            self.copies[key] = record
+
+    def update_copy(self, file_path: str, **fields: Any) -> None:
+        """Set fields on a copy's record; a field set to None is removed."""
+        key = normalise(file_path)
+        with self.transaction():
+            record = self.copies.get(key)
+            if record is None:
+                raise ToolError(f"{file_path} is not a copy this bridge made.")
+            for name, value in fields.items():
+                if value is None:
+                    record.pop(name, None)
+                else:
+                    record[name] = value
 
     def retire_copy(self, file_path: str, reason: str) -> None:
-        """Stop writing to a copy whose state is no longer known."""
-        record = self.copies.get(normalise(file_path))
+        """Stop writing to a copy whose state is no longer known. The mark holds in this bridge
+        even if it cannot be written to the file."""
+        key = normalise(file_path)
+        record = self.copies.get(key)
         if record is not None:
             record["retired"] = reason
-            try:
-                self._save()
-            except OSError as err:  # the in-memory mark still refuses writes for this session
-                log(f"Could not record the retired copy: {err}")
+        try:
+            with self.transaction():
+                if key in self.copies:
+                    self.copies[key]["retired"] = reason
+        except (OSError, ToolError) as err:
+            log(f"Could not record the retired copy: {err}")
 
     def is_protected(self, file_path: str) -> bool:
+        self.refresh()
         return normalise(file_path) in self.entries
 
     def is_copy(self, file_path: str) -> bool:
+        self.refresh()
         return normalise(file_path) in self.copies
 
+    def copy_record(self, file_path: str) -> Optional[Dict[str, Any]]:
+        self.refresh()
+        return self.copies.get(normalise(file_path))
+
     def check_writable(self, file_path: str) -> None:
+        self.refresh()
         self._require_readable()
-        if self.is_protected(file_path):
+        if normalise(file_path) in self.entries:
             raise ToolError(
                 f"Refused: {file_path} is a protected base model. Variants and estimating models are written "
                 "to a copy, never the base. Use sw_save_copy_and_open first."
@@ -800,10 +857,21 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
         """Regeneration health. A rebuild SOLIDWORKS reported as failed is a failure even when no
         feature shows an error: the geometry may be the previous variant's."""
         path = normalise(doc.GetPathName() or doc.GetTitle())
+        record = protected.copy_record(path) if doc.GetPathName() else None
         if rebuild_ok is False:
             stale[path] = "the last rebuild reported failure"
+            if record is not None:
+                try:
+                    protected.update_copy(path, rebuild_failed=stale[path])
+                except (OSError, ToolError) as err:
+                    log(f"Could not record the failed rebuild: {err}")
         elif rebuild_ok is True:
             stale.pop(path, None)
+            if record is not None and record.get("rebuild_failed"):
+                protected.update_copy(path, rebuild_failed=None)
+        elif record is not None and record.get("rebuild_failed"):
+            # Recorded by this or an earlier run of the bridge: only a new successful rebuild clears it.
+            stale[path] = record["rebuild_failed"]
         errors = session().feature_errors(doc)
         failed = [e for e in errors if not e["warning"]]
         health: Dict[str, Any] = {
@@ -1019,7 +1087,7 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
 
         # 1. Validate the whole batch before changing anything.
         problems: List[str] = []
-        current = {d["name"]: d for d in session().dimensions(doc)} if dimension_values else {}
+        current = {d["name"]: dict(d) for d in session().dimensions(doc)} if dimension_values else {}  # a copy: the values before
         equation_targets = set()
         if dimension_values:
             for equation in session().equations(doc):
@@ -1064,7 +1132,7 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
                 before = current[name]["value_si"]
                 status = session().set_dimension(doc, name, value)
                 if status == "Successful":
-                    undo.append(lambda n=name, v=before: session().set_dimension(doc, n, v))
+                    undo.append(lambda n=name, v=before: restore_dimension(doc, n, v))
                     changes.append({"name": name, "kind": "dimension", "from": before, "to": value, "status": status})
                 else:
                     raise ToolError(f"SOLIDWORKS refused {name} = {value}: {status}")
@@ -1076,6 +1144,9 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
                 except Exception as undo_err:  # noqa: BLE001
                     not_undone.append(str(undo_err))
             rebuilt = session().rebuild(doc) if undo else True
+            # A restore SOLIDWORKS answers with a status rather than an exception is only believed once
+            # the value reads back as it was. Every name this call touched is read, including the one that failed.
+            not_undone += restoration_problems(doc, dimension_values, current, global_values, found_globals)
             reason = str(err)
             if not_undone or not rebuilt:
                 protected.retire_copy(args["expected_path"], "a parameter change failed and could not be fully undone")
@@ -1090,7 +1161,53 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
 
         # 3. Rebuild, and believe SOLIDWORKS when it says the rebuild failed.
         rebuild_ok = session().rebuild(doc)
-        return {"changes": changes, "health": health_of(doc, rebuild_ok), "saved": False}
+        try:
+            health = health_of(doc, rebuild_ok)
+        except Exception as err:  # noqa: BLE001 - the change is in, but its health could not be read
+            reason = f"the health after a change could not be read ({err})"
+            stale[normalise(args["expected_path"])] = reason
+            try:
+                protected.update_copy(args["expected_path"], rebuild_failed=reason)
+            except (OSError, ToolError) as record_err:
+                log(f"Could not record the unread health: {record_err}")
+            raise ToolError(
+                f"The changes were applied, but {reason}. Treat this variant as failed: do not measure or save it until "
+                f"a rebuild reports success. Changes: {json.dumps(changes)}"
+            ) from err
+        return {"changes": changes, "health": health, "saved": False}
+
+    def restore_dimension(doc: Any, name: str, value: float) -> None:
+        status = session().set_dimension(doc, name, value)
+        if status != "Successful":
+            raise ToolError(f"SOLIDWORKS refused to restore {name}: {status}")
+
+    def restoration_problems(
+        doc: Any,
+        dimension_values: Dict[str, Any],
+        current: Dict[str, Dict[str, Any]],
+        global_values: Dict[str, Any],
+        found_globals: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        """Read back every value a failed call touched. Anything not as it was, or unreadable, is a problem."""
+        problems: List[str] = []
+        try:
+            now = {d["name"]: d.get("value_si") for d in session().dimensions(doc)} if dimension_values else {}
+        except Exception as err:  # noqa: BLE001
+            return [f"the dimensions could not be read back ({err})"]
+        for name in dimension_values:
+            was = current[name]["value_si"]
+            value = now.get(name)
+            if not isinstance(value, (int, float)) or abs(value - was) > 1e-9 * max(1.0, abs(was)):
+                problems.append(f"{name} reads {value!r}, not {was!r}")
+        for name in global_values:
+            try:
+                found = session().find_global(doc, name)
+            except Exception as err:  # noqa: BLE001
+                problems.append(f"{name} could not be read back ({err})")
+                continue
+            if found is None or " ".join(found["text"].split()) != " ".join(found_globals[name]["text"].split()):
+                problems.append(f"{name} reads {None if found is None else found['text']!r}, not {found_globals[name]['text']!r}")
+        return problems
 
     @server.tool(
         "sw_save_active",
@@ -1251,6 +1368,7 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
                 rebuilt = session().rebuild(doc)
                 if [f["name"] for f in session().feature_list(doc)] != before_names or not rebuilt:
                     raise ToolError("the part after the delete is not the part before")
+                health_of(doc, True)  # a verified rebuild of the part as it was: clears a failure this step recorded
             except Exception as err:  # noqa: BLE001
                 protected.retire_copy(args["expected_path"], f"a {kind} failed and could not be removed")
                 raise ToolError(
@@ -1271,29 +1389,34 @@ def build_server(session_factory: Callable[[], SolidWorksSession], protected: Pr
                 name = session().chamfer(doc, spec)
         except Exception as err:  # noqa: BLE001
             roll_back(f"SOLIDWORKS failed the {kind}: {err}.", None)
-        rebuild_ok = session().rebuild(doc)
-        after = snapshot(doc)
-        added = [f["name"] for f in (after["features"] or []) if f["name"] not in before_names]
-        if kind == "sketch":
-            sketches = [f["name"] for f in (after["features"] or []) if f["name"] in added and f["type"] == "ProfileFeature"]
-            name = sketches[0] if len(sketches) == 1 else None
-        if name is None or name not in added:
-            roll_back(f"SOLIDWORKS did not report the new {kind}.", None)
-        health = health_of(doc, rebuild_ok)
-        if not health["regenerated"]:
-            roll_back(f"The part did not rebuild cleanly after the {kind}.", name)
-        faces_made = None
-        if kind in ("fillet", "chamfer"):
-            faces_made = session().feature_face_count(doc, name)
-            if faces_made is None or faces_made < len(spec["edge_points_m"]):
-                roll_back(f"The {kind} owns {'an unknown number of' if faces_made is None else faces_made} face(s) for {len(spec['edge_points_m'])} edge(s), so not every edge took it.", name)
-        integrity = integrity_compare(before, after, [name])
-        if integrity["result"] == "foreign":
-            protected.retire_copy(args["expected_path"], "unexpected features appeared during a build step")
-            raise ToolError(
-                "The feature list after this step holds features this step did not make. The step fails; the bridge will "
-                f"not write to this part again. {json.dumps({k: integrity[k] for k in ('unexpected_features', 'missing_features')})}"
-            )
+        try:
+            rebuild_ok = session().rebuild(doc)
+            after = snapshot(doc)
+            added = [f["name"] for f in (after["features"] or []) if f["name"] not in before_names]
+            if kind == "sketch":
+                sketches = [f["name"] for f in (after["features"] or []) if f["name"] in added and f["type"] == "ProfileFeature"]
+                name = sketches[0] if len(sketches) == 1 else None
+            if name is None or name not in added:
+                roll_back(f"SOLIDWORKS did not report the new {kind}.", None)
+            health = health_of(doc, rebuild_ok)
+            if not health["regenerated"]:
+                roll_back(f"The part did not rebuild cleanly after the {kind}.", name)
+            faces_made = None
+            if kind in ("fillet", "chamfer"):
+                faces_made = session().feature_face_count(doc, name)
+                if faces_made is None or faces_made < len(spec["edge_points_m"]):
+                    roll_back(f"The {kind} owns {'an unknown number of' if faces_made is None else faces_made} face(s) for {len(spec['edge_points_m'])} edge(s), so not every edge took it.", name)
+            integrity = integrity_compare(before, after, [name])
+            if integrity["result"] == "foreign":
+                protected.retire_copy(args["expected_path"], "unexpected features appeared during a build step")
+                raise ToolError(
+                    "The feature list after this step holds features this step did not make. The step fails; the bridge will "
+                    f"not write to this part again. {json.dumps({k: integrity[k] for k in ('unexpected_features', 'missing_features')})}"
+                )
+        except ToolError:
+            raise
+        except Exception as err:  # noqa: BLE001 - the feature is in, but a check stopped: take it out again
+            roll_back(f"Checking the new {kind} stopped unexpectedly ({err}).", None)
         return {"feature": name, "kind": kind, "faces_made": faces_made, "health": health, "document_integrity": integrity, "saved": False}
 
     @server.tool(

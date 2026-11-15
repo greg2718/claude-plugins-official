@@ -149,7 +149,7 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
         ("| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector (Fusion) |",
          f"| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector ({N}) |\n"
          f"| `servers/` | The {N} bridge: a standard-library MCP server the plugin starts itself |"),
-        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + " edition 3 |"),
+        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + " edition 4 |"),
         ("| Connectors | 1 declared in `.mcp.json` — Autodesk Fusion.", f"| Connectors | 1 declared in `.mcp.json` — {N}, through the bundled bridge."),
         ("To run it from a local checkout: `claude --plugin-dir .`, then say \"set us up\".",
          "To run it from a local checkout: `claude --plugin-dir .` in this folder, then say \"set us up\"."),

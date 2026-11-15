@@ -17,7 +17,7 @@ python3 -I -m unittest discover -s tools/cad-variants/tests
 | `overlays/solidworks/` | Manifest, `.mcp.json`, the SOLIDWORKS bridge (COM, via pywin32) and its CAD adapter |
 | `overlays/onshape/` | Manifest, `.mcp.json`, the Onshape bridge (REST, signed API keys) and its CAD adapter |
 | `NOTICE` | Apache-2.0 attribution, copied into each edition |
-| `tests/` | MCP framing, Onshape request signing, helpers, and every write guard against fake CAD sessions |
+| `tests/` | MCP framing, Onshape request signing, helpers, and every write guard against fake CAD sessions; `test_recovery.py` covers failed undo, restart, writes with no answer and two bridge processes |
 
 ## What is and isn't verified
 
@@ -32,6 +32,13 @@ python3 -I -m unittest discover -s tools/cad-variants/tests
   extrude, cut, fillet, chamfer), STEP import (C1), and listing bodies and external
   references for the integrity check. Each build step is checked and undone on
   failure; the SOLIDWORKS default part template enum (8) is not confirmed.
+- **Recovery, unverified live:** an undo is believed only once every value it
+  touched reads back as before; a failed rebuild stays failed across restarts;
+  an Onshape write with no answer quarantines the copy with a record of the
+  attempt until `onshape_reconcile_copy` reads it; and the state file is changed
+  only as one locked read-change-write, so two bridge processes cannot undo each
+  other's marks. Tested against fakes only. Until a live run covers failure,
+  restart, two sessions and the original's preservation, use disposable models.
 - **Not built:** CAM. Neither SOLIDWORKS CAM nor Onshape CAM Studio has a published
   API, so both editions use the feature path, which upstream already defines, and
   say so. Threads, lofts and sheet metal are hand-entered beside the model.
@@ -48,3 +55,10 @@ Onshape: make a read-only API key first, set `ONSHAPE_ACCESS_KEY` and
 `onshape_read_parameters`, `onshape_read_properties`). Only then a read-write key
 and a copied-document sweep, then `onshape_create_document` with one sketch and
 extrude. Each call counts against the plan's annual API limit.
+
+Recovery, on disposable models only: see the failure, restart, two-session and
+original-preserved steps in the live test checklist. For Onshape, starting the
+bridge with `ONSHAPE_BRIDGE_TEST_DROP_NEXT_WRITE_ANSWER=1` sends the next Part
+Studio or Variable Studio write for real and throws its answer away, once, so a
+lost answer can be tested without pulling the network cable. Never set it
+outside a test.

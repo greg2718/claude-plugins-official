@@ -65,6 +65,7 @@ library only: Python 3.10+ is all it needs.
 | `onshape_check_base_untouched` | Confirm the base did not move. Refuses to answer when either microversion is missing | the base workspace's current microversion against the one recorded |
 | `onshape_create_document` | Create a new, private document for an estimating model, and register it as one the bridge writes. Checks its one Part Studio is empty | `POST /documents`; `GET /documents/d/{did}/w/{wid}/elements` |
 | `onshape_add_feature` | One sketch, extrude, cut, fillet or chamfer, checked before and after, deleted again on failure | `POST /partstudios/d/{did}/w/{wid}/e/{eid}/features` (`BTMSketch-151`, `BTMFeature-134` for `extrude`, `fillet`, `chamfer`); `DELETE .../features/featureid/{fid}`; `POST .../featurescript` to count edges and faces |
+| `onshape_reconcile_copy` | After a write with no answer: read what Onshape holds, compare it with the recorded attempt, and lift or keep the quarantine | `GET .../features`, `GET /variables/...`, `GET /documents/d/{did}/versions`; `DELETE .../features/featureid/{fid}` for a feature added without its checks |
 | `onshape_import_step`, `onshape_import_status` | Import a customer's STEP file into a new document, and register it | `POST /documents`; `POST /translations/d/{did}/w/{wid}` (multipart upload); `GET /translations/{tid}` |
 | `onshape_list_contents` | The integrity check: features, sketches, bodies, external references | `GET .../features`; `GET .../bodydetails`; derived features and reference parameters in the feature list |
 | `onshape_read_faces` | Read bodies and faces of a Part Studio | `GET .../bodydetails` |
@@ -246,8 +247,21 @@ itself rather than relying on the steps being followed:
   first if it is not protected yet. A copy of a copy is refused.
 - **It checks every assignment before writing any.** If a write still fails
   part way, it undoes the earlier writes in that call and returns a change
-  journal (from, to, written, undone). If the undo fails, it stops writing to
-  that copy for good: discard it and make a new one.
+  journal (from, to, written, undone), after reading back that each undone
+  variable has its old expression. If the undo fails or does not read back, it
+  stops writing to that copy for good: discard it and make a new one.
+- **A write with no answer quarantines the copy.** Before each write to a copy
+  the bridge records the attempted change in the state file. A timeout, a
+  dropped connection or a 5xx answer to a write means Onshape may or may not
+  have applied it: the bridge never undoes or retries on a guess. It keeps the
+  attempted change, marks the outcome unknown and refuses every write to that
+  copy, in this session and after a restart, until `onshape_reconcile_copy` has
+  read what Onshape holds. A record left by a bridge that stopped mid-write is
+  treated the same way. Reconciling lifts the quarantine when the change is
+  wholly absent or wholly present (a feature added without its checks is
+  deleted again first); anything partial retires the copy for good. A new
+  document or copy whose creation got no answer is never registered, so the
+  bridge never writes to it.
 - **Health must be positive evidence.** `regenerated` is `true` only when every
   active feature has a recognised state of `OK`, `INFO` or `WARNING`. A missing
   feature list, missing states or an unrecognised status is `null` (unknown),
@@ -257,8 +271,12 @@ itself rather than relying on the steps being followed:
   refuses to answer when either the recorded or the current microversion is
   missing, rather than comparing two empty values.
 - **Its state fails closed.** The list of protected bases and bridge-made copies
-  is written atomically under a lock file. If the file cannot be read, the
-  bridge writes nothing until a person checks it and fixes or removes it
+  is written atomically under a lock file. Every change to it is one step under
+  that lock: read the file again, change it, write it. A copy another bridge
+  process retired or quarantined stays so, and every write checks the file
+  again first, so two sessions on one machine cannot undo each other's safety
+  marks. If the file cannot be read, the bridge writes nothing until a person
+  checks it and fixes or removes it
   (`~/.manufacturing-onshape/protected.json` unless `ONSHAPE_BRIDGE_STATE`
   says otherwise).
 - **Each build step is checked and undone on failure.** `onshape_add_feature`

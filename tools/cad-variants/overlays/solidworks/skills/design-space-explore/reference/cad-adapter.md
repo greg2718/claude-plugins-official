@@ -223,23 +223,33 @@ itself rather than relying on the steps being followed:
 - **It checks a whole parameter set before changing anything**: every
   dimension exists, is driving, is not read-only and is not set by an equation;
   every global variable exists; every value is a number. If a change still fails
-  part way, it undoes the earlier changes in that call. If the undo itself
-  fails, it stops writing to that copy for good: discard it and make a new one.
+  part way, it undoes the earlier changes in that call, then reads back every
+  dimension and global variable the call touched. It reports the copy as it was
+  only when each one reads its old value. An undo that raises, that SOLIDWORKS
+  answers with a status other than success, or that does not read back stops
+  writing to that copy for good: discard it and make a new one.
 - **A failed rebuild is a failed variant.** If `ForceRebuild3` reports failure,
   the variant is `regeneration_failed` even when no feature shows an error,
   because the geometry may be the previous variant's. `sw_read_properties`
-  will not measure it.
+  will not measure it. The failure is kept in the state file, so it still
+  holds after the bridge or SOLIDWORKS restarts; only a later rebuild that
+  SOLIDWORKS reports as a success clears it. Health that cannot be read after a
+  change counts the same way.
 - **Its state fails closed.** The list of protected bases and bridge-made copies
-  is written atomically under a lock file. If the file cannot be read, the
-  bridge writes nothing until a person checks it and fixes or removes it
-  (`%USERPROFILE%\.manufacturing-solidworks\protected.json` unless
-  `SOLIDWORKS_BRIDGE_STATE` says otherwise).
+  is written atomically under a lock file. Every change to it is one step under
+  that lock: read the file again, change it, write it. A copy another bridge
+  process retired stays retired, and every write checks the file again first,
+  so two sessions on one machine cannot undo each other's safety marks. If the
+  file cannot be read, the bridge writes nothing until a person checks it and
+  fixes or removes it (`%USERPROFILE%\.manufacturing-solidworks\protected.json`
+  unless `SOLIDWORKS_BRIDGE_STATE` says otherwise).
 - **Each build step is checked and undone on failure.** `sw_add_feature`
   checks the whole step before changing anything. Afterwards the part must
   rebuild, a fillet or chamfer must own a face per edge, and the feature list
   must be the old one plus exactly this feature. Otherwise it deletes the
-  feature again and says so; if the delete fails, or features appear that this
-  step did not make, it stops writing to that file for good.
+  feature again and says so, also when a check after the change stops with an
+  unexpected error. If the delete fails, or features appear that this step did
+  not make, it stops writing to that file for good.
 
 ## Document integrity — before and after every design step
 
