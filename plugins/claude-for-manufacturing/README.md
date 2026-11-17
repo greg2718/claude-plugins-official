@@ -2,24 +2,29 @@
 
 **Maintenance status:** Reference implementation. Not actively maintained or monitored, and not accepting contributions. Issues and pull requests may not receive a response. This project is provided AS IS, without warranty.
 
-## Help test the SOLIDWORKS and Onshape editions
+## Help test the SOLIDWORKS, Onshape and SolidCraft editions
 
-The [SOLIDWORKS](https://github.com/greg2718/claude-plugins-official/tree/main/plugins/manufacturing-solidworks) and
-[Onshape](https://github.com/greg2718/claude-plugins-official/tree/main/plugins/manufacturing-onshape) editions of this plugin
-are a community fork. They are not products of Anthropic, Dassault Systèmes or
-PTC, and **neither has been run against a real SOLIDWORKS session or Onshape
-account yet**: their bridges were checked against each vendor's API
-documentation and unit tests, not live use.
+The [SOLIDWORKS](https://github.com/greg2718/claude-plugins-official/tree/main/plugins/manufacturing-solidworks),
+[Onshape](https://github.com/greg2718/claude-plugins-official/tree/main/plugins/manufacturing-onshape) and
+[SolidCraft](https://github.com/greg2718/claude-plugins-official/tree/main/plugins/manufacturing-solidcraft) editions of this plugin
+are a community fork. They are not products of Anthropic, Dassault Systèmes,
+PTC or the SolidCraft maintainers. **Neither the SOLIDWORKS nor the Onshape
+edition has been run against a real SOLIDWORKS session or Onshape account
+yet**: their bridges were checked against each vendor's API documentation and
+unit tests, not live use. The SolidCraft bridge has been run against
+SolidCraft's headless engine on generated test parts, not yet on anyone's own
+models.
 
 **Test only with disposable copies of parts, never with models you value.** The
 bridges write only to copies they make themselves, check each parameter set
 before changing anything, and refuse to measure a model that did not rebuild
 cleanly, but none of that has been proven on real CAD yet.
 
-If you use SOLIDWORKS or Onshape, a first test would help a lot:
+If you use SOLIDWORKS, Onshape or SolidCraft, a first test would help a lot:
 
-1. From a checkout of this fork, run `claude --plugin-dir plugins/manufacturing-solidworks`
-   or `claude --plugin-dir plugins/manufacturing-onshape`.
+1. From a checkout of this fork, run `claude --plugin-dir plugins/manufacturing-solidworks`,
+   `claude --plugin-dir plugins/manufacturing-onshape` or
+   `claude --plugin-dir plugins/manufacturing-solidcraft`.
 2. Connect your CAD system as the setup table below says for your edition.
 3. Make a throwaway copy of a simple part with two or three driving dimensions,
    open that copy, and ask for a few variants (`design-space-explore`).
@@ -59,7 +64,7 @@ it fresher, never mandatory.
 
 The exception is `design-space-explore`, which generates CAD variants and so
 needs a live CAD connection: **Autodesk Fusion on the desktop** in this plugin,
-**SOLIDWORKS** or **Onshape** through their editions of it (see
+**SOLIDWORKS**, **Onshape** or **SolidCraft** through their editions of it (see
 [CAD editions](#cad-editions)), or a CAD system connected through
 `custom-connector`. A shop running Creo, NX or Inventor has no path to that one
 skill yet. Its partner
@@ -79,7 +84,7 @@ Infor M3 are the two ERP options; a plant connects one:
 | **Infor M3** | Add your company's Infor M3 MCP server as a custom connector in Claude's connector settings, using the server address your Infor administrator gives you. The plugin only reads from it |
 
 Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address is
-already set. The SOLIDWORKS and Onshape [editions](#cad-editions) declare their
+already set. The SOLIDWORKS, Onshape and SolidCraft [editions](#cad-editions) declare their
 own bridge in its place. Each needs one action from you before it will connect:
 
 | System | What to do |
@@ -87,10 +92,11 @@ own bridge in its place. Each needs one action from you before it will connect:
 | **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |
 | **SOLIDWORKS** | On the Windows machine that runs SOLIDWORKS, install Python 3.10 or later and run `pip install pywin32`. The plugin starts its bridge itself, and it needs SOLIDWORKS open with the model. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`) |
 | **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |
+| **SolidCraft** | Install SolidCraft (Windows, macOS or Linux) so that `solidcraft-cli` is on the PATH, or set `SOLIDCRAFT_CLI` to its full path. Set `SOLIDCRAFT_ALLOW_PATHS` to the folders that hold your models and where copies may go. The plugin starts its bridge itself, and the bridge runs SolidCraft headless: nothing has to be open. Needs Python 3.10 or later; if the launcher is not `python3`, set `SOLIDCRAFT_BRIDGE_PYTHON` |
 
 ### CAD editions
 
-The same plugin comes in three editions, one per CAD system. The skills are the
+The same plugin comes in four editions, one per CAD system. The skills are the
 same; only the CAD connection differs. Install the one your shop runs.
 
 | CAD system | Edition | How it connects |
@@ -98,14 +104,17 @@ same; only the CAD connection differs. Install the one your shop runs.
 | **Autodesk Fusion** | This plugin, `claude-for-manufacturing` | Fusion's own MCP server, in the desktop app |
 | **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |
 | **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |
+| **SolidCraft** | [`manufacturing-solidcraft`](../manufacturing-solidcraft) | A bundled bridge to SolidCraft's own MCP server, run headless on the engineer's machine (open source; Windows, macOS or Linux) |
 
-All three editions do the same CAD work: they vary existing models
+All four editions do the same CAD work: they vary existing models
 (`design-space-explore`), and in `rfq-to-quote` they build an estimating model
 from a drawing or text, adapt a prior part's model, and import a STEP file. The
-SOLIDWORKS and Onshape editions do not derive CAM hours, because neither
-SOLIDWORKS CAM nor Onshape CAM Studio publishes an API: hours come from the
-feature path, and the quote says so. Neither bridge has been run against a live
-SOLIDWORKS session or Onshape account yet. Both
+SOLIDWORKS, Onshape and SolidCraft editions do not derive CAM hours: neither
+SOLIDWORKS CAM nor Onshape CAM Studio publishes an API, and SolidCraft has no
+CAM. Hours come from the feature path, and the quote says so. Neither the
+SOLIDWORKS nor the Onshape bridge has been run against a live session or
+account yet; the SolidCraft bridge only against test parts in SolidCraft's
+headless engine. All three community
 editions are generated from `claude-for-manufacturing` by `tools/cad-variants/build.py`
 at the root of this repository.
 
@@ -367,8 +376,8 @@ store), which is precisely why it is safe to run unattended overnight.
 
 It works with four connectors once connected: Microsoft 365 for documents, mail and the export
 landing folder; Oracle NetSuite or Infor M3 for the ERP records; Autodesk
-Fusion for CAD and CAM, or SOLIDWORKS or Onshape for CAD in their
-[editions](#cad-editions). [Getting started](#getting-started) has what each one needs.
+Fusion for CAD and CAM, or SOLIDWORKS, Onshape or SolidCraft for CAD in
+their [editions](#cad-editions). [Getting started](#getting-started) has what each one needs.
 
 Microsoft 365, NetSuite and Infor M3 are connectors you enable in Claude, so
 the plugin declares none of them — NetSuite's and M3's addresses are specific

@@ -4,13 +4,20 @@ Copyright Anthropic, licensed under the Apache License, Version 2.0 (see LICENSE
 
 Changes from the upstream plugin:
 - Autodesk Fusion, the upstream plugin's one CAD connector, is replaced by a different
-  CAD system (SOLIDWORKS or Onshape, per edition) through a bridge in servers/.
+  CAD system (SOLIDWORKS, Onshape or SolidCraft, per edition) through a bridge in servers/.
 - Text in the skills that named Fusion is changed to the edition's CAD system. The
   bridge builds estimating models, imports STEP files and varies existing models;
-  CAM, which the edition's CAD system offers no published API for, is marked as not
-  available, with the feature-path fallback the upstream plugin already defines.
+  CAM, which the edition's CAD system offers no published API or module for, is marked
+  as not available, with the feature-path fallback the upstream plugin already defines.
 - The changes are made by tools/cad-variants/build.py in the fork that carries this folder.
 
-This edition is not published, endorsed or maintained by Anthropic, Dassault Systèmes or PTC.
+This edition is not published, endorsed or maintained by Anthropic, Dassault Systèmes, PTC or
+the SolidCraft maintainers (Tangency Labs).
 SOLIDWORKS is a trademark of Dassault Systèmes. Onshape is a trademark of PTC Inc.
 Autodesk Fusion is a trademark of Autodesk, Inc.
+
+SolidCraft (https://github.com/tangency-labs/solidcraft) is open-source software by the
+SolidCraft contributors, under the MIT License or the Apache License 2.0. Its name, logo and
+look are covered by its own brand licence (LICENSE-BRAND in its repository). The SolidCraft
+edition includes no SolidCraft code or brand material: its bridge starts the copy of
+solidcraft-cli the user installed, and names SolidCraft only to say what it connects to.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build the SOLIDWORKS and Onshape editions of claude-for-manufacturing.
+"""Build the SOLIDWORKS, Onshape and SolidCraft editions of claude-for-manufacturing.
 
-    python3 tools/cad-variants/build.py            # writes plugins/manufacturing-solidworks and plugins/manufacturing-onshape
+    python3 tools/cad-variants/build.py            # writes plugins/manufacturing-solidworks, -onshape and -solidcraft
     python3 tools/cad-variants/build.py --check    # fails if the committed editions differ from a fresh build
 
 Each edition is the upstream plugin (plugins/claude-for-manufacturing), copied,
@@ -38,7 +38,7 @@ ALLOWED_FUSION_LINES = {
     "README.md": [
         "with Autodesk Fusion replaced by",
         "only where they named Fusion",
-        "edition**. Autodesk Fusion and",
+        "edition**. Autodesk Fusion, ",
         "| **Autodesk Fusion** | [`claude-for-manufacturing`]",
     ],
     "NOTICE": [""],
@@ -96,7 +96,43 @@ ONSHAPE = Edition(
     version_word="microversion",
 )
 
-EDITIONS = {e.key: e for e in (SOLIDWORKS, ONSHAPE)}
+SOLIDCRAFT = Edition(
+    key="solidcraft",
+    name="SolidCraft",
+    plugin="manufacturing-solidcraft",
+    connect="SolidCraft installed with its command-line tool, solidcraft-cli, and the bundled bridge connected; the model is a .sc design file the bridge opens itself",
+    open_prior="The user gives the path of the prior model's .sc design file.",
+    doc="file",
+    example_ref="/home/eng/Fairview/BracketUpper.sc (sha256 3f9a…)",
+    example_variant_ref="/home/eng/Fairview/Studies/BracketUpper-V001.sc",
+    example_variant_ref_2="/home/eng/Fairview/Studies/BracketUpper-V002.sc",
+    example_estimate_ref="/home/eng/Estimates/EH-RFQ-0912_L1_PN-4471-B_R2.sc",
+    example_prior_ref="/home/eng/Fairview/PN-4402-A.sc sha256 7c41… (fingerprint read again after the run: unchanged)",
+    example_adapted_ref="/home/eng/Estimates/EH-RFQ-0930_L1_PN-4402-C_R1.sc",
+    version_word="file fingerprint (SHA-256)",
+)
+
+EDITIONS = {e.key: e for e in (SOLIDWORKS, ONSHAPE, SOLIDCRAFT)}
+ALL_NAMES = ("SOLIDWORKS", "Onshape", "SolidCraft")
+
+
+def others(e: Edition) -> str:
+    """The other community editions, as a phrase: "Onshape and SolidCraft"."""
+    return " and ".join(n for n in ALL_NAMES if n != e.name)
+
+
+def live(e: Edition) -> str:
+    """What the bridge has not yet been run against, as the end of "has not yet been run against …"."""
+    return pick(
+        e,
+        "a live SOLIDWORKS session",
+        "a live Onshape account",
+        "a plant's own SolidCraft models",
+    )
+
+
+def pick(e: Edition, solidworks: str, onshape: str, solidcraft: str) -> str:
+    return {"solidworks": solidworks, "onshape": onshape, "solidcraft": solidcraft}[e.key]
 
 
 def tool(e: Edition, name: str) -> str:
@@ -107,6 +143,8 @@ def tool(e: Edition, name: str) -> str:
         "onshape": {"new": "onshape_create_document", "add": "onshape_add_feature",
                     "import": "onshape_import_step", "list": "onshape_list_contents",
                     "faces": "onshape_read_faces", "read": "onshape_read_parameters"},
+        "solidcraft": {"new": "sc_new_part", "add": "sc_add_feature", "import": "sc_import_step",
+                       "list": "sc_list_contents", "faces": "sc_read_faces", "read": "sc_read_parameters"},
     }
     return names[e.key][name]
 
@@ -118,38 +156,55 @@ OS_SETUP_ROW = (
     '| **Onshape** | In Onshape: *My Account → Developer* (or *Company Settings → Developer* for a company account) → create an API key. Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from, never in the conversation. On an Enterprise stack, also set `ONSHAPE_BASE_URL` to `https://<company>.onshape.com`. Needs Python 3.10 or later; if the launcher is not `python3`, set `ONSHAPE_BRIDGE_PYTHON` |'
 )
 
+SC_SETUP_ROW = (
+    '| **SolidCraft** | Install SolidCraft (Windows, macOS or Linux) so that `solidcraft-cli` is on the PATH, or set `SOLIDCRAFT_CLI` to its full path. Set `SOLIDCRAFT_ALLOW_PATHS` to the folders that hold your models and where copies may go. The plugin starts its bridge itself, and the bridge runs SolidCraft headless: nothing has to be open. Needs Python 3.10 or later; if the launcher is not `python3`, set `SOLIDCRAFT_BRIDGE_PYTHON` |'
+)
+EDITION_ROWS = {
+    "solidworks": "| **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |",
+    "onshape": "| **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |",
+    "solidcraft": "| **SolidCraft** | [`manufacturing-solidcraft`](../manufacturing-solidcraft) | A bundled bridge to SolidCraft's own MCP server, run headless on the engineer's machine (open source; Windows, macOS or Linux) |",
+}
+
 
 def readme_edits(e: Edition) -> List[Tuple[str, str]]:
     N, k = e.name, e.key
-    other = "Onshape" if k == "solidworks" else "SOLIDWORKS"
     if k == "solidworks":
         setup_row = SW_SETUP_ROW
         declared = ("The SOLIDWORKS bridge is declared in `.mcp.json` as a local program, because it attaches to\n"
                     "SOLIDWORKS on your own Windows machine through the SOLIDWORKS API.")
-    else:
+    elif k == "onshape":
         setup_row = OS_SETUP_ROW
         declared = ("The Onshape bridge is declared in `.mcp.json` as a local program that calls Onshape's REST\n"
                     "API with your API keys; nothing has to be open in a browser.")
+    else:
+        setup_row = SC_SETUP_ROW
+        declared = ("The SolidCraft bridge is declared in `.mcp.json` as a local program that starts\n"
+                    "SolidCraft's own MCP server, `solidcraft-cli mcp`, headless on your machine.")
+    checked = pick(
+        e,
+        f"its calls were checked against {N}'s API documentation, not\nexercised",
+        f"its calls were checked against {N}'s API documentation, not\nexercised",
+        "it was run only against SolidCraft 0.44's headless engine, on\ngenerated test parts",
+    )
     return [
         ("# Claude for Manufacturing\n\n**Maintenance status:** Reference implementation. Not actively maintained or monitored, and not accepting contributions. Issues and pull requests may not receive a response. This project is provided AS IS, without warranty.",
          f"# Manufacturing — {N} edition\n\n**What this is:** a community edition of Anthropic's [Claude for Manufacturing](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-for-manufacturing)\n"
          f"reference plugin, with Autodesk Fusion replaced by {N}. The skills are upstream's, changed\n"
          f"only where they named Fusion. The {N} bridge in `servers/` is new, and **has not yet been run\n"
-         f"against a live {N} {'session' if k == 'solidworks' else 'account'}**: its calls were checked against {N}'s API documentation, not\n"
-         f"exercised. Generated by `tools/cad-variants/build.py`; edit the overlays there, not this folder.\n"
+         f"against {live(e)}**: {checked}. Generated by `tools/cad-variants/build.py`; edit the overlays there, not this folder.\n"
          "Provided AS IS, without warranty, like the upstream plugin (see `NOTICE`)."),
         ("1. Install **Claude for Manufacturing** from the Claude plugin directory.",
          f"1. Install this folder as a plugin (`claude --plugin-dir plugins/{e.plugin}` from a checkout)."),
-        ("needs a live CAD connection: **Autodesk Fusion on the desktop** in this plugin,\n**SOLIDWORKS** or **Onshape** through their editions of it (see\n[CAD editions](#cad-editions)), or a CAD system connected through\n`custom-connector`. A shop running Creo, NX or Inventor has no path to that one\nskill yet. Its partner",
-         f"needs a live CAD connection: **{N}, through the bridge bundled with this\nedition**. Autodesk Fusion and {other} have editions of their own (see\n[CAD editions](#cad-editions)). Its partner"),
-        ("Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address is\nalready set. The SOLIDWORKS and Onshape [editions](#cad-editions) declare their\nown bridge in its place. Each needs one action from you before it will connect:",
+        ("needs a live CAD connection: **Autodesk Fusion on the desktop** in this plugin,\n**SOLIDWORKS**, **Onshape** or **SolidCraft** through their editions of it (see\n[CAD editions](#cad-editions)), or a CAD system connected through\n`custom-connector`. A shop running Creo, NX or Inventor has no path to that one\nskill yet. Its partner",
+         f"needs a live CAD connection: **{N}, through the bridge bundled with this\nedition**. Autodesk Fusion, {others(e)} have editions of their own (see\n[CAD editions](#cad-editions)). Its partner"),
+        ("Autodesk Fusion is declared in this plugin's `.mcp.json`, so its address is\nalready set. The SOLIDWORKS, Onshape and SolidCraft [editions](#cad-editions) declare their\nown bridge in its place. Each needs one action from you before it will connect:",
          f"Only {N} is declared in this plugin's `.mcp.json`, as its bundled bridge — but\nit still needs one action from you before it will connect:"),
-        ("| **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |\n" + SW_SETUP_ROW + "\n" + OS_SETUP_ROW,
+        ("| **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |\n" + SW_SETUP_ROW + "\n" + OS_SETUP_ROW + "\n" + SC_SETUP_ROW,
          setup_row),
         ("| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector (Fusion) |",
          f"| `.claude-plugin/`, `.mcp.json` | The plugin manifest and the one declared connector ({N}) |\n"
          f"| `servers/` | The {N} bridge: a standard-library MCP server the plugin starts itself |"),
-        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + " edition 4 |"),
+        ("| Version | 1.0.0 |", "| Version | 1.0.0 (upstream), " + k + pick(e, " edition 4 |", " edition 4 |", " edition 1 |")),
         ("| Connectors | 1 declared in `.mcp.json` — Autodesk Fusion.", f"| Connectors | 1 declared in `.mcp.json` — {N}, through the bundled bridge."),
         ("To run it from a local checkout: `claude --plugin-dir .`, then say \"set us up\".",
          "To run it from a local checkout: `claude --plugin-dir .` in this folder, then say \"set us up\"."),
@@ -158,13 +213,16 @@ def readme_edits(e: Edition) -> List[Tuple[str, str]]:
         ("Without\nFusion it still runs, a rung down the ladder, and says so. A part close to one\nyou already make starts from that part's model, saved as a new document so the\noriginal is never touched; a 3D STEP file is read rather than rebuilt;",
          f"Without\n{N} it still runs, a rung down the ladder, and says so. A part close to one\nyou already make starts from that part's model in {N}, saved as a new {e.doc} so the\noriginal is never touched; a 3D STEP file is imported into a new {e.doc} and read rather than rebuilt;"),
         ("`design-space-explore` generates a batch of CAD variants directly in Fusion\nby applying changed parameters to the model you already have\nopen",
-         f"`design-space-explore` generates a batch of CAD variants in {N}\nby applying changed parameters to the model you already have\n{'open' if k == 'solidworks' else 'in Onshape'}"),
+         f"`design-space-explore` generates a batch of CAD variants in {N}\nby applying changed parameters to the model you already have\n{pick(e, 'open', 'in Onshape', 'in a SolidCraft design file')}"),
         ("| RFQ to quote | customer-inquiry-intake → data-consolidate → design step in Fusion → quote-build, four gates |",
          f"| RFQ to quote | customer-inquiry-intake → data-consolidate → design step in {N} → quote-build, four gates |"),
-        ("Oracle NetSuite or Infor M3 for the ERP records; Autodesk\nFusion for CAD and CAM, or SOLIDWORKS or Onshape for CAD in their\n[editions](#cad-editions).",
+        ("Oracle NetSuite or Infor M3 for the ERP records; Autodesk\nFusion for CAD and CAM, or SOLIDWORKS, Onshape or SolidCraft for CAD in\ntheir [editions](#cad-editions).",
          f"Oracle NetSuite or Infor M3 for the ERP records; {N}\nfor CAD."),
-        ("The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. Install the one your shop runs.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | This plugin, `claude-for-manufacturing` | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | [`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | [`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nAll three editions do the same CAD work",
-         f"The same plugin comes in three editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. This is the {N} edition.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | [`claude-for-manufacturing`](../claude-for-manufacturing), Anthropic's original | Fusion's own MCP server, in the desktop app |\n| **SOLIDWORKS** | {'This plugin, ' if k == 'solidworks' else ''}[`manufacturing-solidworks`](../manufacturing-solidworks) | A bundled bridge to SOLIDWORKS on the engineer's Windows machine (Python and pywin32) |\n| **Onshape** | {'This plugin, ' if k == 'onshape' else ''}[`manufacturing-onshape`](../manufacturing-onshape) | A bundled bridge to Onshape's REST API, with the plant's API keys |\n\nAll three editions do the same CAD work"),
+        ("The same plugin comes in four editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. Install the one your shop runs.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | This plugin, `claude-for-manufacturing` | Fusion's own MCP server, in the desktop app |\n"
+         + "\n".join(EDITION_ROWS.values()) + "\n\nAll four editions do the same CAD work",
+         f"The same plugin comes in four editions, one per CAD system. The skills are the\nsame; only the CAD connection differs. This is the {N} edition.\n\n| CAD system | Edition | How it connects |\n|---|---|---|\n| **Autodesk Fusion** | [`claude-for-manufacturing`](../claude-for-manufacturing), Anthropic's original | Fusion's own MCP server, in the desktop app |\n"
+         + "\n".join(row.replace("| [`", "| This plugin, [`", 1) if key == k else row for key, row in EDITION_ROWS.items())
+         + "\n\nAll four editions do the same CAD work"),
         ("(`shared/erp-connectors.md`). Fusion is declared in `.mcp.json` at a local address,\nbecause its MCP server runs inside the desktop app on your machine rather than\nin the cloud.",
          f"(`shared/erp-connectors.md`). {declared}"),
     ]
@@ -188,7 +246,7 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
             ("- **Fusion isn't open, or the customer uses Fusion's web client** — the\n  connector cannot work at all. Detect and say so plainly; there is no\n  server-side fetch path.\n- **The connector replays an earlier script** — geometry nobody asked for\n  appears, or read-only calls fail with \"cannot modify.\" Stop and ask the user\n  to restart Fusion; see `reference/cad-adapter.md`.",
              f"- **The bridge is not connected, or its precondition is not met** — say\n  exactly what is missing ({e.connect}) and stop.\n- **The bridge refuses a write** — it names why: a protected base, or a\n  {e.doc} that is not the one expected. Never work around it; see\n  `reference/cad-adapter.md`."),
             ("**One CAD tool, on one platform.** The skill works for customers running\nFusion on the desktop, with no cloud path. There is no fallback CAD backend —\nno connector currently reaches SolidWorks, Creo, NX or Inventor, so a customer\non any of those has no path to this skill at all. State that plainly rather\nthan letting a prospect discover it for the first time in a demo. Keep the\nCAD-adapter layer regardless, so a CAD connector appearing later drops in\nwithout a redesign.\n\n**If Fusion is not available** — the skill cannot generate variants and says\nso, naming exactly what is needed: Fusion desktop with the document open.",
-             f"**One CAD tool.** This edition works for customers running {N}, through\nthe bridge bundled with it. The bridge has not yet been run against a live\n{N} {'session' if k == 'solidworks' else 'account'}: say so on every manifest it produces until it has.\nState that plainly rather than letting a prospect discover it in a demo.\n\n**If {N} is not available** — the skill cannot generate variants and says\nso, naming exactly what is needed: {e.connect}."),
+             f"**One CAD tool.** This edition works for customers running {N}, through\nthe bridge bundled with it. The bridge has not yet been run against\n{live(e)}: say so on every manifest it produces until it has.\nState that plainly rather than letting a prospect discover it in a demo.\n\n**If {N} is not available** — the skill cannot generate variants and says\nso, naming exactly what is needed: {e.connect}."),
         ],
         "skills/design-space-explore/reference/parametric-check.md": [
             ("2. **Test whether changing it regenerates dependent geometry.** Where the\n   CAD tool supports it, this can be a small probe change and revert rather\n   than a destructive test.",
@@ -199,13 +257,14 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
              "every behavior listed there applies. Every write names the "
              + e.doc + " it expects\nto act on, and the bridge refuses a protected base."),
             ("Fusion has no file-only path: **the prior model must be open in the desktop\napp.** Ask the user to open it. Opening it from the hub by script is not\nverified on this connector; do not rely on it.",
-             (f"**The prior model must be open and active in {N}.** Ask the user to open\nit; the bridge never opens it by script. Then protect it (`sw_protect_base`)."
-              if k == "solidworks" else
-              "**The user gives the prior model's Part Studio URL**; the document,\nworkspace and element ids are in it. Then protect it (`onshape_protect_base`).")),
+             pick(e,
+                 f"**The prior model must be open and active in {N}.** Ask the user to open\nit; the bridge never opens it by script. Then protect it (`sw_protect_base`).",
+                 "**The user gives the prior model's Part Studio URL**; the document,\nworkspace and element ids are in it. Then protect it (`onshape_protect_base`).",
+                 "**The user gives the path of the prior model's `.sc` file.** The bridge\nopens it in its own headless SolidCraft session and protects it in the same\ncall (`sc_open_base`); it never saves to that path.")),
             ("add-in is replaying an earlier script. Stop, and ask the user to restart\nFusion.",
              "copy is not the one expected, or something else wrote to it. Stop, and\ntell the user what was found."),
             ("Read-only: the prior model's version number is the one recorded at step 1.\n**If it moved, stop and tell the user at once**, naming the model and both\nversion numbers. Restoring an earlier version is the user's call, made in\nFusion, never this skill's.",
-             f"Read-only: the prior model's {e.version_word} is the one recorded at step 1\n(`{'sw_check_base_untouched' if k == 'solidworks' else 'onshape_check_base_untouched'}`).\n**If it moved, stop and tell the user at once**, naming the model and both\nvalues. Restoring an earlier version is the user's call, made in\n{N}{' or PDM' if k == 'solidworks' else ''}, never this skill's."),
+             f"Read-only: the prior model's {e.version_word} is the one recorded at step 1\n(`{pick(e, 'sw_check_base_untouched', 'onshape_check_base_untouched', 'sc_check_base_untouched')}`).\n**If it moved, stop and tell the user at once**, naming the model and both\nvalues. Restoring an earlier version is the user's call, made in\n{N}{' or PDM' if k == 'solidworks' else ''}, never this skill's."),
             ("**No Fusion at all** is not a path B fallback;",
              f"**No {N} connection at all** is not a path B fallback;"),
         ],
@@ -243,7 +302,7 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
         ],
         "skills/rfq-to-quote/reference/design-step.md": [
             ("Read `../../design-space-explore/reference/cad-adapter.md` first: the\ncreate-from-scratch calls, and the connector behaviors that lose calls or plant\nforeign geometry. The rules that matter most:\n\n- Every script defines `run(context)` and prints what it needs back.\n- Inspection calls are `readOnly: true`.\n- Each call under about 25 seconds.\n- Design workspace active on every call.\n- Fusion open with the document active; there is no file-only path.\n\nThen:",
-             f"Read `../../design-space-explore/reference/cad-adapter.md` first: the bridge's\ncreate-from-scratch tools, and the behaviors that break a naive build. The\nrules that matter most:\n\n- {N} connected: {e.connect.replace(', and the URL of the base Part Studio', '').replace(' with the model open and active', '')}.\n- The bridge builds only in a {e.doc} it made (`{tool(e, 'new')}`).\n- One feature per `{tool(e, 'add')}` call; it checks the feature and undoes it\n  if the check fails.\n- Dimensions in millimetres. Fillet and chamfer edges are named by a point\n  mid-edge.\n- Sketch, extrude, cut, fillet and chamfer only. A thread, loft or sheet-metal\n  feature is hand-entered beside the model, and said so.\n- **Building through the {N} bridge is unverified**: it has not been run\n  against a live {N} {'session' if k == 'solidworks' else 'account'}. Say so at Gate 3.\n\nThen:"),
+             f"Read `../../design-space-explore/reference/cad-adapter.md` first: the bridge's\ncreate-from-scratch tools, and the behaviors that break a naive build. The\nrules that matter most:\n\n- {N} connected: {e.connect.replace(', and the URL of the base Part Studio', '').replace(' with the model open and active', '')}.\n- The bridge builds only in a {e.doc} it made (`{tool(e, 'new')}`).\n- One feature per `{tool(e, 'add')}` call; it checks the feature and undoes it\n  if the check fails.\n- Dimensions in millimetres. Fillet and chamfer edges are named by a point\n  mid-edge.\n- Sketch, extrude, cut, fillet and chamfer only. A thread, loft or sheet-metal\n  feature is hand-entered beside the model, and said so.\n- **Building through the {N} bridge is unverified**: it has not been run\n  against {live(e)}. Say so at Gate 3.\n\nThen:"),
             ("document lists none. Anything there means the add-in is replaying an earlier\n   script: stop and ask the user to restart Fusion.",
              f"{e.doc} lists none. Anything there: stop, and tell the user what was found."),
             ("   this line. Record both lists. Tell the user to restart Fusion.",
@@ -253,7 +312,7 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
             ("Without Fusion: the hand-entered feature list, prefilled from the text, every\nrow `from_text`, `origin: hand_entered`. Still a ROM.",
              f"Without {N}: the hand-entered feature list, prefilled from the text, every\nrow `from_text`, `origin: hand_entered`. Still a ROM."),
             ("**STEP import through the connector is unverified.** It has never been run in\nthis repo. Say so on the line, every time.\n\nWith Fusion: import the STEP into a new document named like any estimating\nmodel, integrity check before and after, then read bodies, bounding box,\nvolume and faces read-only.",
-             f"**STEP import through the {N} bridge is unverified.** It has not been run\nagainst a live {N} {'session' if k == 'solidworks' else 'account'}. Say so on the line, every time.\n\nWith {N}: import the STEP with `{tool(e, 'import')}` into a new {e.doc} named\nlike any estimating model, integrity check before and after (`{tool(e, 'list')}`),\nthen read bodies, bounding box, volume and faces read-only (`{tool(e, 'faces')}`)."),
+             f"**STEP import through the {N} bridge is unverified.** It has not been run\nagainst {live(e)}. Say so on the line, every time.\n\nWith {N}: import the STEP with `{tool(e, 'import')}` into a new {e.doc} named\nlike any estimating model, integrity check before and after (`{tool(e, 'list')}`),\nthen read bodies, bounding box, volume and faces read-only (`{tool(e, 'faces')}`)."),
             ("`origin: customer_step`, `cad_backend: fusion`.",
              f"`origin: customer_step`, `cad_backend: {k}`."),
             ("**When the import fails or Fusion is not connected**, in this order:",
@@ -346,21 +405,23 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
         ],
         "skills/custom-connector/reference/known-systems.md": [
             ("| Autodesk Fusion | 1 — supported | First-party integration. Desktop app only |",
-             (f"| SOLIDWORKS | 1 — supported | Bundled bridge (`servers/solidworks_bridge.py`), Windows only, SOLIDWORKS running. No vendor-published MCP |\n"
-              f"| Autodesk Fusion | 1 — vendor MCP, added via custom-connector | Desktop app only. Not used by this edition's skills |")
-             if k == "solidworks" else
-             (f"| Onshape (REST API) | 1 — supported | Bundled bridge (`servers/onshape_bridge.py`) with the plant's API keys |\n"
-              f"| Autodesk Fusion | 1 — vendor MCP, added via custom-connector | Desktop app only. Not used by this edition's skills |")),
+             pick(e,
+                  "| SOLIDWORKS | 1 — supported | Bundled bridge (`servers/solidworks_bridge.py`), Windows only, SOLIDWORKS running. No vendor-published MCP |",
+                  "| Onshape (REST API) | 1 — supported | Bundled bridge (`servers/onshape_bridge.py`) with the plant's API keys |",
+                  "| SolidCraft | 1 — supported | Bundled bridge (`servers/solidcraft_bridge.py`) to SolidCraft's own MCP server (`solidcraft-cli mcp`), run headless. Open source (MIT or Apache-2.0) |")
+             + "\n| Autodesk Fusion | 1 — vendor MCP, added via custom-connector | Desktop app only. Not used by this edition's skills |"),
             ("Oracle NetSuite, Infor M3 and Autodesk Fusion. These are the supported\nconnectors; only Fusion is declared in the plugin's `.mcp.json`.**",
              f"Oracle NetSuite, Infor M3 and {N}. These are the supported\nconnectors; only {N} is declared in the plugin's `.mcp.json`, as its bundled bridge.**"),
             ("**No skill in this plugin uses it:** `design-space-explore` and `rfq-to-quote` are built on Fusion, so connecting Onshape enables nothing today — say so |",
-             ("**No skill in this plugin uses it:** this is the SOLIDWORKS edition; the Onshape edition of this plugin reaches Onshape through its own bridge — say so |"
-              if k == "solidworks" else
-              "**It does not replace the bundled bridge:** it writes FeatureScript custom features; `design-space-explore` and `rfq-to-quote` read and vary models through the bridge. Connect it only to author custom features |")),
+             pick(e,
+                  "**No skill in this plugin uses it:** this is the SOLIDWORKS edition; the Onshape edition of this plugin reaches Onshape through its own bridge — say so |",
+                  "**It does not replace the bundled bridge:** it writes FeatureScript custom features; `design-space-explore` and `rfq-to-quote` read and vary models through the bridge. Connect it only to author custom features |",
+                  "**No skill in this plugin uses it:** this is the SolidCraft edition; the Onshape edition of this plugin reaches Onshape through its own bridge — say so |")),
             ("| **Autodesk Fusion** | In the Fusion **desktop** app: *Preferences → General → API* → enable **Fusion MCP Server**. It runs locally on your machine and needs Fusion open with a document. If you changed the port from 27182, set `FUSION_MCP_PORT` |",
-             ("| **SOLIDWORKS** | On the Windows machine running SOLIDWORKS: install Python 3.10+ and run `pip install pywin32`. The plugin starts the bridge itself. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`). Open SOLIDWORKS with the model before asking |"
-              if k == "solidworks" else
-              "| **Onshape** | Create an API key in Onshape (*My Account → Developer*, or *Company Settings → Developer*). Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from — never in the conversation. Enterprise stacks also set `ONSHAPE_BASE_URL`. Needs Python 3.10+; set `ONSHAPE_BRIDGE_PYTHON` if the launcher is not `python3` |")),
+             pick(e,
+                  "| **SOLIDWORKS** | On the Windows machine running SOLIDWORKS: install Python 3.10+ and run `pip install pywin32`. The plugin starts the bridge itself. If the Python launcher is not `python`, set `SOLIDWORKS_BRIDGE_PYTHON` (for example `py`). Open SOLIDWORKS with the model before asking |",
+                  "| **Onshape** | Create an API key in Onshape (*My Account → Developer*, or *Company Settings → Developer*). Set `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` in the environment Claude starts from — never in the conversation. Enterprise stacks also set `ONSHAPE_BASE_URL`. Needs Python 3.10+; set `ONSHAPE_BRIDGE_PYTHON` if the launcher is not `python3` |",
+                  "| **SolidCraft** | Install SolidCraft so that `solidcraft-cli` is on the PATH, or set `SOLIDCRAFT_CLI` to its full path. Set `SOLIDCRAFT_ALLOW_PATHS` to the folders the bridge may read and write. Needs Python 3.10+; set `SOLIDCRAFT_BRIDGE_PYTHON` if the launcher is not `python3`. Nothing has to be open: the bridge runs SolidCraft headless |")),
         ],
         "shared/approval-gates.md": [
             ("  Slack or Fusion, approval or not,", f"  Slack or {N}, approval or not,"),
@@ -369,9 +430,10 @@ def edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
         "README.md": readme_edits(e),
         "shared/secret-config.md": [
             ("connector's settings (`${FUSION_MCP_PORT}`),",
-             "connector's settings (`${SOLIDWORKS_BRIDGE_PYTHON}`),"
-             if k == "solidworks" else
-             "connector's settings and credentials (`${ONSHAPE_ACCESS_KEY}`, `${ONSHAPE_SECRET_KEY}`),"),
+             pick(e,
+                  "connector's settings (`${SOLIDWORKS_BRIDGE_PYTHON}`),",
+                  "connector's settings and credentials (`${ONSHAPE_ACCESS_KEY}`, `${ONSHAPE_SECRET_KEY}`),",
+                  "connector's settings (`${SOLIDCRAFT_CLI}`, `${SOLIDCRAFT_ALLOW_PATHS}`),")),
         ],
     }
 
@@ -439,7 +501,7 @@ def safety_edits(e: Edition) -> Dict[str, List[Tuple[str, str]]]:
              "`reused_existing` with its reference; never create a second copy. If there is\n"
              "no manifest from the earlier run, say so and ask the engineer before making\n"
              "new copies"
-             + (" (the bridge already refuses a file name that exists)." if k == "solidworks" else ".")),
+             + (" (the bridge already refuses a file name that exists)." if k in ("solidworks", "solidcraft") else ".")),
         ],
         "shared/contracts/variant-manifest.md": [
             ("  external_references_present: true\n```",

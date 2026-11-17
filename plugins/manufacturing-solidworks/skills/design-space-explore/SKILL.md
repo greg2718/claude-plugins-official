@@ -201,8 +201,8 @@ an analysis tool or a person to evaluate and return results into, which
 ## Degradation
 
 **One CAD tool.** This edition works for customers running SOLIDWORKS, through
-the bridge bundled with it. The bridge has not yet been run against a live
-SOLIDWORKS session: say so on every manifest it produces until it has.
+the bridge bundled with it. The bridge has not yet been run against
+a live SOLIDWORKS session: say so on every manifest it produces until it has.
 State that plainly rather than letting a prospect discover it in a demo.
 
 **If SOLIDWORKS is not available** — the skill cannot generate variants and says

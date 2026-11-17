@@ -1,12 +1,12 @@
 name: CAD edition test report
-description: Report how the SOLIDWORKS or Onshape edition of Claude for Manufacturing worked for you
+description: Report how the SOLIDWORKS, Onshape or SolidCraft edition of Claude for Manufacturing worked for you
 title: "[Test report] "
 labels: ["test-report"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for trying a CAD edition. These editions are a community fork, not products of Anthropic, Dassault Systèmes or PTC.
+        Thanks for trying a CAD edition. These editions are a community fork, not products of Anthropic, Dassault Systèmes, PTC or the SolidCraft maintainers.
         Please don't paste API keys, passwords or customer part files here.
   - type: dropdown
     id: edition
@@ -15,13 +15,14 @@ body:
       options:
         - manufacturing-solidworks
         - manufacturing-onshape
+        - manufacturing-solidcraft
     validations:
       required: true
   - type: input
     id: cad-version
     attributes:
       label: CAD version
-      description: SOLIDWORKS release and service pack, or Onshape plan (Standard, Professional, Enterprise)
+      description: SOLIDWORKS release and service pack, Onshape plan (Standard, Professional, Enterprise), or SolidCraft version (`solidcraft-cli --version`)
       placeholder: SOLIDWORKS 2025 SP2
     validations:
       required: true

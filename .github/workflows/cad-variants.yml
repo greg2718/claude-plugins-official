@@ -1,6 +1,6 @@
 name: CAD editions
 
-# Rebuilds the SOLIDWORKS and Onshape editions of claude-for-manufacturing and
+# Rebuilds the SOLIDWORKS, Onshape and SolidCraft editions of claude-for-manufacturing and
 # fails if the committed copies are stale, then runs the bridge tests.
 
 on:
